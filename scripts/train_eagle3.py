@@ -83,6 +83,38 @@ def print_cuda_memory_debug(label: str) -> None:
     )
 
 
+def _cuda_optional_tensor(value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if isinstance(value, torch.Tensor) and value.numel() > 0:
+        return value.cuda()
+    return None
+
+
+def _cuda_image_grid_thw(
+    value: Optional[Union[torch.Tensor, List[Optional[torch.Tensor]]]],
+    *,
+    per_sample: bool,
+) -> Optional[Union[torch.Tensor, List[Optional[torch.Tensor]]]]:
+    if isinstance(value, list):
+        tensors = [
+            item.cuda() if isinstance(item, torch.Tensor) and item.numel() > 0 else None
+            for item in value
+        ]
+        if not any(item is not None for item in tensors):
+            return None
+        if per_sample:
+            return [item.squeeze() if item is not None else None for item in tensors]
+        return torch.cat(
+            [item.reshape(-1, 3) for item in tensors if item is not None], dim=0
+        )
+
+    if isinstance(value, torch.Tensor) and value.numel() > 0:
+        value = value.cuda()
+        if per_sample:
+            return [thw.squeeze() for thw in value]
+        return value
+    return None
+
+
 def parse_args() -> Tuple[ArgumentParser, Namespace]:
     """
     This function is used to parse the arguments for the training script.
@@ -671,6 +703,10 @@ def run_forward(
     List[torch.Tensor],
 ]:
     if args.is_vlm and args.target_model_backend == "custom":
+        pixel_values = _cuda_optional_tensor(data.get("pixel_values"))
+        image_grid_thw = _cuda_image_grid_thw(
+            data.get("image_grid_thw"), per_sample=False
+        )
         (
             plosses,
             acceptance_rates,
@@ -683,8 +719,8 @@ def run_forward(
             input_ids=data["input_ids"].cuda(),
             attention_mask=data["attention_mask"].cuda(),
             loss_mask=data["loss_mask"].cuda(),
-            pixel_values=data["pixel_values"].cuda(),
-            image_grid_thw=data["image_grid_thw"].cuda(),
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
         )
     else:
         image_grid_thw = None
@@ -693,12 +729,10 @@ def run_forward(
             # Handle VLM data: pixel_values and image_grid_thw are lists
             # pixel_values = [pv.cuda() for pv in data["pixel_values"]] if args.is_vlm else None
             if args.is_vlm:
-                image_grid_thw = (
-                    [thw.cuda().squeeze() for thw in data["image_grid_thw"]]
-                    if args.is_vlm
-                    else None
+                image_grid_thw = _cuda_image_grid_thw(
+                    data.get("image_grid_thw"), per_sample=True
                 )
-                pixel_values = data["pixel_values"].cuda()
+                pixel_values = _cuda_optional_tensor(data.get("pixel_values"))
                 eagle3_data = target_model.generate_eagle3_data(
                     input_ids=data["input_ids"].cuda(),
                     attention_mask=data["attention_mask"].cuda(),

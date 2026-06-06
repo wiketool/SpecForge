@@ -11,6 +11,8 @@ from transformers import AutoConfig, PretrainedConfig
 
 logger = logging.getLogger(__name__)
 
+IMAGE_COLUMNS = ("image", "images", "image_path", "image_file", "image_url")
+
 
 @contextmanager
 def rank_0_priority():
@@ -379,8 +381,13 @@ def safe_conversations_generator(file_path):
                 # Build result with conversations
                 result = {"conversations": cleaned_convs}
 
-                if "image" in row:
-                    result["image"] = row["image"]
+                for image_column in IMAGE_COLUMNS:
+                    if image_column in row:
+                        image = row[image_column]
+                        if image_column == "images" and isinstance(image, list):
+                            image = next((item for item in image if item), None)
+                        result["image"] = image
+                        break
 
                 # Preserve 'tools' field if present
                 if "tools" in row:

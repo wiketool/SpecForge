@@ -52,6 +52,7 @@ from .template import TEMPLATE_REGISTRY, ChatTemplate
 
 # define a type called conversation
 Conversation = List[Dict[str, str]]
+IMAGE_COLUMNS = ("image", "images", "image_path", "image_file", "image_url")
 
 
 # ==============================
@@ -177,6 +178,62 @@ def preprocess_conversations(
     return results
 
 
+def _get_vlm_image_values(examples) -> List[Optional[object]]:
+    if "conversations" not in examples:
+        raise ValueError(
+            f"Expected 'conversations' column for VLM preprocessing, but found columns: {list(examples.keys())}"
+        )
+    conversations = examples["conversations"]
+
+    for column in IMAGE_COLUMNS:
+        if column in examples:
+            image_values = examples[column]
+            if len(image_values) != len(conversations):
+                raise ValueError(
+                    f"VLM image column '{column}' has {len(image_values)} values, "
+                    f"but conversations has {len(conversations)} values."
+                )
+            return image_values
+
+    return [None] * len(conversations)
+
+
+def _normalize_single_image(image: object) -> Optional[object]:
+    if image is None:
+        return None
+    if isinstance(image, str):
+        image = image.strip()
+        if not image:
+            return None
+        try:
+            parsed = json.loads(image)
+        except json.JSONDecodeError:
+            return image
+        if isinstance(parsed, (list, tuple)):
+            return _normalize_single_image(parsed)
+        return image
+    if isinstance(image, (list, tuple)):
+        for item in image:
+            normalized = _normalize_single_image(item)
+            if normalized is not None:
+                return normalized
+        return None
+    return image
+
+
+def _empty_pixel_values(processor: ImageProcessingMixin) -> torch.Tensor:
+    image_processor = getattr(processor, "image_processor", processor)
+    patch_size = getattr(image_processor, "patch_size", None)
+    temporal_patch_size = getattr(image_processor, "temporal_patch_size", 1)
+    num_channels = getattr(image_processor, "num_channels", None)
+
+    if patch_size is None or num_channels is None:
+        return torch.empty((0, 0), dtype=torch.float32)
+
+    patch_dim = int(num_channels) * int(temporal_patch_size) * int(patch_size) ** 2
+    return torch.empty((0, patch_dim), dtype=torch.float32)
+
+
 def preprocess_vlm_conversations(
     processor: ImageProcessingMixin,
     examples: List[Conversation],
@@ -213,8 +270,11 @@ def preprocess_vlm_conversations(
         "image_grid_thw": [],
     }
 
+    image_values = _get_vlm_image_values(examples)
+
     # Note: currently, we assume that each example has only one image
-    for i, image in enumerate(examples["image"]):
+    for i, image in enumerate(image_values):
+        image = _normalize_single_image(image)
         source = examples["conversations"][i]
         messages = [{"role": "system", "content": system_prompt}]
         if not source:
@@ -230,19 +290,22 @@ def preprocess_vlm_conversations(
             role = sentence["role"]
             assert role == convroles[j % 2], f"unexpected role {role}"
             if role == "user":
-                # if the message is from user and has image, process the image
-                messages.append(
-                    {
-                        "role": role,
-                        "content": [
-                            {
-                                "type": "image",
-                                "image": image,
-                            },
-                            {"type": "text", "text": sentence["content"]},
-                        ],
-                    }
-                )
+                if image is not None:
+                    # if the message is from user and has image, process the image
+                    messages.append(
+                        {
+                            "role": role,
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "image": image,
+                                },
+                                {"type": "text", "text": sentence["content"]},
+                            ],
+                        }
+                    )
+                else:
+                    messages.append({"role": role, "content": sentence["content"]})
             else:
                 messages.append({"role": role, "content": sentence["content"]})
 
@@ -251,29 +314,39 @@ def preprocess_vlm_conversations(
             tokenize=False,
             add_generation_prompt=False,
         )
-        # get vision infor use qwen_vl_utils
-        if not HAS_QWEN_VL_UTILS:
-            raise ImportError(
-                "qwen_vl_utils is required for VLM preprocessing but is not installed. "
-                "Please install it to use VLM features."
-            )
-        image_inputs, video_inputs = process_vision_info(messages)
-        assert image_inputs is not None, "image_inputs must not be None"
+        image_inputs, video_inputs = None, None
+        if image is not None:
+            # get vision info using qwen_vl_utils
+            if not HAS_QWEN_VL_UTILS:
+                raise ImportError(
+                    "qwen_vl_utils is required for VLM preprocessing with images but is not installed. "
+                    "Please install it to use VLM features."
+                )
+            image_inputs, video_inputs = process_vision_info(messages)
+            assert image_inputs is not None, "image_inputs must not be None"
 
-        encoding = processor(
-            text=[conversation],
-            images=image_inputs,
-            videos=video_inputs,
-            max_length=max_length,
-            truncation=True,
-            return_tensors="pt",
-            return_offsets_mapping=True,
-            add_special_tokens=False,
-        )
+        processor_kwargs = {
+            "text": [conversation],
+            "max_length": max_length,
+            "truncation": True,
+            "return_tensors": "pt",
+            "return_offsets_mapping": True,
+            "add_special_tokens": False,
+        }
+        if image_inputs is not None:
+            processor_kwargs["images"] = image_inputs
+        if video_inputs is not None:
+            processor_kwargs["videos"] = video_inputs
+
+        encoding = processor(**processor_kwargs)
         input_ids = encoding.input_ids[0]
         offsets = encoding.offset_mapping[0]
-        pixel_values = encoding.pixel_values
-        image_grid_thw = encoding.image_grid_thw[0]
+        pixel_values = getattr(encoding, "pixel_values", None)
+        image_grid_thw = getattr(encoding, "image_grid_thw", None)
+        if image is not None and (pixel_values is None or image_grid_thw is None):
+            raise ValueError(
+                "VLM processor did not return pixel_values and image_grid_thw for an image example."
+            )
 
         # get conversation with image info for loss mask generation
         decoded_conversation = processor.tokenizer.decode(
@@ -288,8 +361,14 @@ def preprocess_vlm_conversations(
         results["input_ids"].append(input_ids[None, :])
         results["loss_mask"].append(loss_mask[None, :])
         results["attention_mask"].append(torch.ones_like(loss_mask)[None, :])
-        results["pixel_values"].append(pixel_values)
-        results["image_grid_thw"].append(image_grid_thw[None, :])
+        results["pixel_values"].append(
+            pixel_values if pixel_values is not None else _empty_pixel_values(processor)
+        )
+        results["image_grid_thw"].append(
+            image_grid_thw
+            if image_grid_thw is not None
+            else torch.empty((0, 3), dtype=torch.long)
+        )
     return results
 
 

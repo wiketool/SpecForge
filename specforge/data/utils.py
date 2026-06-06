@@ -187,6 +187,10 @@ class VlmDataCollatorWithPadding:
         outtensors = torch.cat((intensors, padding_tensor), dim=1)
         return outtensors
 
+    @staticmethod
+    def _has_tensor_data(value: Any) -> bool:
+        return isinstance(value, torch.Tensor) and value.numel() > 0
+
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Collate a batch of features.
@@ -218,12 +222,20 @@ class VlmDataCollatorWithPadding:
         batch_loss_mask = torch.cat(
             [self.paddingtensor2D(item["loss_mask"], max_length) for item in features]
         )
-        batch_pixel_values = torch.cat(
-            [item["pixel_values"] for item in features], dim=0
-        )
-        batch_image_grid_thw = torch.cat(
-            [item["image_grid_thw"] for item in features], dim=0
-        )
+        pixel_values = [
+            item["pixel_values"]
+            for item in features
+            if self._has_tensor_data(item.get("pixel_values"))
+        ]
+        batch_pixel_values = torch.cat(pixel_values, dim=0) if pixel_values else None
+        batch_image_grid_thw = [
+            (
+                item["image_grid_thw"]
+                if self._has_tensor_data(item.get("image_grid_thw"))
+                else None
+            )
+            for item in features
+        ]
         batch = {
             "input_ids": batch_input_ids,
             "attention_mask": batch_attention_mask,

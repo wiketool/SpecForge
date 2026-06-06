@@ -61,6 +61,7 @@ def _to_cpu(value):
         return tuple(_to_cpu(item) for item in value)
     return value
 
+
 class Eagle3TargetModel(ABC):
     """
     This  offers a layer of abstraction for the target model backend. The user can choose different backends to suit their needs:
@@ -583,7 +584,6 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
 
         return position_ids, rope_deltas
 
-
     def extend_vlm(
         self,
         input_ids: torch.Tensor,
@@ -617,8 +617,36 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
         # Process image_grid_thw - convert to list if needed
         if image_grid_thw is None:
             image_grid_thw = [None] * batch_size
+        elif isinstance(image_grid_thw, torch.Tensor) and image_grid_thw.numel() == 0:
+            image_grid_thw = [None] * batch_size
         elif not isinstance(image_grid_thw, (list, tuple)):
-            image_grid_thw = [image_grid_thw]
+            if (
+                isinstance(image_grid_thw, torch.Tensor)
+                and image_grid_thw.dim() == 2
+                and image_grid_thw.shape[0] == batch_size
+            ):
+                image_grid_thw = list(image_grid_thw)
+            else:
+                image_grid_thw = [image_grid_thw]
+        elif len(image_grid_thw) == 0:
+            image_grid_thw = [None] * batch_size
+
+        if len(image_grid_thw) != batch_size:
+            raise ValueError(
+                "image_grid_thw must provide one entry per VLM sample. "
+                f"Got {len(image_grid_thw)} entries for batch size {batch_size}."
+            )
+
+        if pixel_values is not None and isinstance(pixel_values, (list, tuple)):
+            pixel_values = torch.cat(pixel_values, dim=0) if pixel_values else None
+
+        if isinstance(pixel_values, torch.Tensor) and pixel_values.numel() == 0:
+            pixel_values = None
+
+        if pixel_values is not None and not isinstance(pixel_values, torch.Tensor):
+            raise TypeError(
+                f"pixel_values must be a tensor, list of tensors, or None, got {type(pixel_values)}"
+            )
 
         # pixel_values is a single 2D tensor (total_patches, patch_dim) for Qwen2.5-VL
         # We need to track offset and slice it based on image_grid_thw for each sample
@@ -635,6 +663,10 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
             # Compute num_patches for this sample from image_grid_thw_
             # image_grid_thw_: (num_images, 3) where each row is (t, h, w)
             if image_grid_thw_ is not None:
+                if pixel_values is None:
+                    raise ValueError(
+                        "pixel_values must be provided when image_grid_thw is provided."
+                    )
                 # Ensure image_grid_thw_ is 2D: (num_images, 3)
                 if image_grid_thw_.dim() == 1:
                     image_grid_thw_ = image_grid_thw_.unsqueeze(0)  # (3,) -> (1, 3)
@@ -684,31 +716,34 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
                 tokens_per_second=self.tokens_per_second,
             )
 
-            offset = BaseMultimodalProcessor.get_mm_items_offset(
-                input_id_flat, self.image_token_id
-            )
-            mm_item = MultimodalDataItem(
-                modality=Modality.IMAGE,
-                feature=pixel_value_,  # torch.Tensor: (num_patches, patch_dim)
-                pad_value=self.image_token_id,  # Required for placeholder tensor creation
-                offsets=offset,  # List of (start, end) tuples
-            )
-            mm_item.set("image_grid_thw", image_grid_thw_.cpu())
-            mm_item.set_pad_value()
-            mm_inputs = MultimodalInputs(
-                mm_items=[mm_item],
-                im_token_id=self.image_token_id,
-                im_start_id=self.vision_start_token_id,
-                im_end_id=self.vision_end_token_id,
-                mrope_positions=(
-                    mrope_positions.squeeze(1) if mrope_positions is not None else None
-                ),
-                mrope_position_delta=mrope_position_delta,
-            )
-            pattern = MultiModalityDataPaddingPatternMultimodalTokens()
-            input_id_list = pattern.pad_input_tokens(
-                input_id_.view(-1).tolist(), mm_inputs
-            )
+            mm_inputs = None
+            input_id_list = input_id_.view(-1).tolist()
+            if image_grid_thw_ is not None:
+                offset = BaseMultimodalProcessor.get_mm_items_offset(
+                    input_id_flat, self.image_token_id
+                )
+                mm_item = MultimodalDataItem(
+                    modality=Modality.IMAGE,
+                    feature=pixel_value_,  # torch.Tensor: (num_patches, patch_dim)
+                    pad_value=self.image_token_id,  # Required for placeholder tensor creation
+                    offsets=offset,  # List of (start, end) tuples
+                )
+                mm_item.set("image_grid_thw", image_grid_thw_.cpu())
+                mm_item.set_pad_value()
+                mm_inputs = MultimodalInputs(
+                    mm_items=[mm_item],
+                    im_token_id=self.image_token_id,
+                    im_start_id=self.vision_start_token_id,
+                    im_end_id=self.vision_end_token_id,
+                    mrope_positions=(
+                        mrope_positions.squeeze(1)
+                        if mrope_positions is not None
+                        else None
+                    ),
+                    mrope_position_delta=mrope_position_delta,
+                )
+                pattern = MultiModalityDataPaddingPatternMultimodalTokens()
+                input_id_list = pattern.pad_input_tokens(input_id_list, mm_inputs)
             req = Req(
                 rid=str(idx),
                 origin_input_text="",
@@ -718,7 +753,8 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
             req.fill_ids = req.origin_input_ids
             req.extend_input_len = len(req.fill_ids) - len(req.prefix_indices)
             req.logprob_start_len = len(req.origin_input_ids) - 1
-            req.multimodal_inputs = mm_inputs
+            if mm_inputs is not None:
+                req.multimodal_inputs = mm_inputs
             data_cache.append([input_id_, attention_mask_, loss_mask_])
             reqs.append(req)
 
