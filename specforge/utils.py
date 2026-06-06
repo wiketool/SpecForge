@@ -379,6 +379,9 @@ def safe_conversations_generator(file_path):
                 # Build result with conversations
                 result = {"conversations": cleaned_convs}
 
+                if "image" in row:
+                    result["image"] = row["image"]
+
                 # Preserve 'tools' field if present
                 if "tools" in row:
                     tools = row["tools"]

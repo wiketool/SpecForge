@@ -213,7 +213,8 @@ class OnlineEagle3Model(Eagle3Model):
                 mrope_positions_ids, _ = self.target_model.get_rope_index(
                     input_ids=input_ids, image_grid_thw=image_grid_thw
                 )
-                return mrope_positions_ids
+            #   return mrope_positions_ids
+                return mrope_positions_ids.to(device=device, dtype=torch.long)
             return (
                 torch.arange(
                     past_key_values_length,

@@ -52,6 +52,15 @@ class Eagle3TargetOutput:
     last_hidden_states: Optional[torch.Tensor] = None
 
 
+def _to_cpu(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, list):
+        return [_to_cpu(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_to_cpu(item) for item in value)
+    return value
+
 class Eagle3TargetModel(ABC):
     """
     This  offers a layer of abstraction for the target model backend. The user can choose different backends to suit their needs:
@@ -551,7 +560,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
         if not self.is_vlm:
             raise ValueError("get_rope_index is only available for VLM models")
 
-        from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
+        target_device = input_ids.device
 
         position_ids, rope_deltas = MRotaryEmbedding.get_rope_index(
             spatial_merge_size=self.spatial_merge_size,
@@ -559,15 +568,21 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
             video_token_id=self.video_token_id,
             vision_start_token_id=self.vision_start_token_id,
             model_type=self.model_type,
-            input_ids=input_ids,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            second_per_grid_ts=second_per_grid_ts,
-            attention_mask=attention_mask,
+            input_ids=_to_cpu(input_ids),
+            image_grid_thw=_to_cpu(image_grid_thw),
+            video_grid_thw=_to_cpu(video_grid_thw),
+            second_per_grid_ts=_to_cpu(second_per_grid_ts),
+            attention_mask=_to_cpu(attention_mask),
             tokens_per_second=self.tokens_per_second,
         )
 
+        if position_ids is not None:
+            position_ids = position_ids.to(target_device)
+        if rope_deltas is not None:
+            rope_deltas = rope_deltas.to(target_device)
+
         return position_ids, rope_deltas
+
 
     def extend_vlm(
         self,
