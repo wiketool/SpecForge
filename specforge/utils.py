@@ -330,7 +330,22 @@ def shard_optimizer_state_with_dtensor(bf16_optimizer, device_mesh):
                 )
 
 
-def safe_conversations_generator(file_path):
+def _has_nonempty_assistant_message(conversations):
+    for message in conversations:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if content is None:
+            continue
+        if isinstance(content, str) and content.strip() == "":
+            continue
+        return True
+    return False
+
+
+def safe_conversations_generator(file_path, require_assistant_response=False):
     """
     Generator that:
     1. Extracts the 'conversations' field.
@@ -378,6 +393,11 @@ def safe_conversations_generator(file_path):
 
                     cleaned_convs.append(new_msg)
 
+                if require_assistant_response and not _has_nonempty_assistant_message(
+                    cleaned_convs
+                ):
+                    continue
+
                 # Build result with conversations
                 result = {"conversations": cleaned_convs}
 
@@ -413,7 +433,7 @@ def safe_conversations_generator(file_path):
                             # Primitive type, keep as-is
                             result["tools"] = tools
                     else:
-                        result["tools"] = []
+                        result["tools"] = json.dumps([], ensure_ascii=False)
 
                 yield result
 

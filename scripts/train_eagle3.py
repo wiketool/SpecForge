@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoProcessor, AutoTokenizer
 
-from datasets import Dataset
+from datasets import Dataset, Features, Value
 from specforge import (
     AutoDraftModelConfig,
     AutoEagle3DraftModel,
@@ -550,10 +550,29 @@ def build_dataloaders(
         f"{args.target_model_path}"  # Tokenizer may also different
     )
     cache_key = hashlib.md5(cache_params_string.encode()).hexdigest()
-    train_dataset = Dataset.from_generator(
-        generator=safe_conversations_generator,
-        gen_kwargs={"file_path": args.train_data_path},
+    generator_features = (
+        Features(
+            {
+                "conversations": [
+                    {"role": Value("string"), "content": Value("string")}
+                ],
+                "image": Value("string"),
+                "tools": Value("string"),
+            }
+        )
+        if args.is_vlm
+        else None
     )
+    train_generator_kwargs = {
+        "generator": safe_conversations_generator,
+        "gen_kwargs": {
+            "file_path": args.train_data_path,
+            "require_assistant_response": not args.is_preformatted,
+        },
+    }
+    if generator_features is not None:
+        train_generator_kwargs["features"] = generator_features
+    train_dataset = Dataset.from_generator(**train_generator_kwargs)
     is_online = (
         args.train_data_path is not None and args.train_hidden_states_path is None
     )
@@ -601,10 +620,16 @@ def build_dataloaders(
     )
     if args.eval_data_path is not None or args.eval_hidden_states_path is not None:
         if args.eval_data_path is not None:
-            eval_dataset = Dataset.from_generator(
-                generator=safe_conversations_generator,
-                gen_kwargs={"file_path": args.eval_data_path},
-            )
+            eval_generator_kwargs = {
+                "generator": safe_conversations_generator,
+                "gen_kwargs": {
+                    "file_path": args.eval_data_path,
+                    "require_assistant_response": not args.is_preformatted,
+                },
+            }
+            if generator_features is not None:
+                eval_generator_kwargs["features"] = generator_features
+            eval_dataset = Dataset.from_generator(**eval_generator_kwargs)
             eval_eagle3_dataset = build_eagle3_dataset(
                 eval_dataset,
                 tokenizer,

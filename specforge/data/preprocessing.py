@@ -60,6 +60,25 @@ IMAGE_COLUMNS = ("image", "images", "image_path", "image_file", "image_url")
 # ==============================
 
 
+def _has_assistant_response(example: Dict) -> bool:
+    conversations = example.get("conversations")
+    if not conversations:
+        return False
+
+    for message in conversations:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if content is None:
+            continue
+        if isinstance(content, str) and content.strip() == "":
+            continue
+        return True
+    return False
+
+
 def _apply_loss_mask_from_chat_template(
     text: str,
     offsets: torch.Tensor,
@@ -286,12 +305,13 @@ def preprocess_vlm_conversations(
             source = source[1:]
 
         convroles = ["user", "assistant"]
+        image_attached = False
         for j, sentence in enumerate(source):
             role = sentence["role"]
             assert role == convroles[j % 2], f"unexpected role {role}"
             if role == "user":
-                if image is not None:
-                    # if the message is from user and has image, process the image
+                if image is not None and not image_attached:
+                    # A single-image conversation should reference the image once.
                     messages.append(
                         {
                             "role": role,
@@ -304,6 +324,7 @@ def preprocess_vlm_conversations(
                             ],
                         }
                     )
+                    image_attached = True
                 else:
                     messages.append({"role": role, "content": sentence["content"]})
             else:
@@ -428,6 +449,22 @@ def build_eagle3_dataset(
     ), f"Chat template {chat_template} not found in TEMPLATE_REGISTRY, you may need to register it first"
 
     template: ChatTemplate = TEMPLATE_REGISTRY.get(chat_template)
+
+    original_cols = dataset.column_names
+    if not is_preformatted and "conversations" in original_cols:
+        original_len = len(dataset)
+        filter_num_proc = num_proc if num_proc is not None and num_proc > 1 else None
+        dataset = dataset.filter(
+            _has_assistant_response,
+            num_proc=filter_num_proc,
+            desc="Filtering examples without assistant responses",
+        )
+        removed = original_len - len(dataset)
+        if removed:
+            print(
+                f"Filtered {removed} examples without assistant responses "
+                f"({removed / original_len:.2%} of {original_len})."
+            )
 
     dataset = dataset.shuffle(seed=shuffle_seed)
     original_cols = dataset.column_names
