@@ -46,7 +46,7 @@ class FakeClient:
 def make_args(**overrides):
     args = SimpleNamespace(
         model="qwen2.5-vl",
-        max_tokens=128000,
+        max_tokens=4096,
         temperature=0.8,
         top_p=None,
         top_k=None,
@@ -63,7 +63,7 @@ def make_args(**overrides):
 
 class TestRegenerateTrainDataVlm(unittest.TestCase):
 
-    def test_parse_arguments_defaults_max_tokens_to_128k(self):
+    def test_parse_arguments_defaults_max_tokens_to_4096(self):
         argv = [
             "regenerate_train_data.py",
             "--model",
@@ -78,7 +78,7 @@ class TestRegenerateTrainDataVlm(unittest.TestCase):
         with patch("sys.argv", argv):
             args = regenerate_train_data.parse_arguments()
 
-        self.assertEqual(args.max_tokens, 128000)
+        self.assertEqual(args.max_tokens, 4096)
         self.assertFalse(args.is_vlm)
 
     def test_get_image_urls_accepts_images_list(self):

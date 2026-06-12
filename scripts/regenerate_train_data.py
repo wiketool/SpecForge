@@ -21,7 +21,7 @@ python3 -m sglang.launch_server \
 python scripts/regenerate_train_data.py \
     --model Qwen/Qwen3.5-35B-A3B \
     --concurrency 128 \
-    --max-tokens 128000 \
+    --max-tokens 4096 \
     --server-address localhost:30000 localhost:30010 localhost:30020 localhost:30030 localhost:30040 localhost:30050 localhost:30060 localhost:30070 \
     --temperature 0.8 \
     --input-file-path /data/jiapingW/pr/SpecForge/cache/dataset/opc_train_first_turn.jsonl \
@@ -116,8 +116,8 @@ def parse_arguments():
     sampling_params_group.add_argument(
         "--max-tokens",
         type=int,
-        default=128000,
-        help="Maximum number of output tokens (default: 128000)",
+        default=4096,
+        help="Maximum number of output tokens (default: 4096)",
     )
 
     # optimization
