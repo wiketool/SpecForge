@@ -21,13 +21,17 @@ python3 -m sglang.launch_server \
 python scripts/regenerate_train_data.py \
     --model Qwen/Qwen3.5-35B-A3B \
     --concurrency 128 \
-    --max-tokens 4096 \
+    --max-tokens 128000 \
     --server-address localhost:30000 localhost:30010 localhost:30020 localhost:30030 localhost:30040 localhost:30050 localhost:30060 localhost:30070 \
     --temperature 0.8 \
     --input-file-path /data/jiapingW/pr/SpecForge/cache/dataset/opc_train_first_turn.jsonl \
     --output-file-path ./cache/dataset/opc_train_regen_first_turn.jsonl \
     --resume \
     --reasoning save
+
+For VLM JSONL rows with top-level image fields, add --is-vlm. The script scans
+image, images, image_path, image_file, and image_url by default, then injects
+the image(s) into the first user message as OpenAI-compatible image_url content.
 """
 
 import argparse
@@ -35,10 +39,13 @@ import json
 import os
 import random
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 from tqdm import tqdm
+
+
+IMAGE_FIELD_NAMES = ("image", "images", "image_path", "image_file", "image_url")
 
 
 def parse_arguments():
@@ -63,6 +70,21 @@ def parse_arguments():
         "--is-gpt-oss",
         action="store_true",
         help="Whether the model is a GPT-OSS model",
+    )
+    model_group.add_argument(
+        "--is-vlm",
+        action="store_true",
+        help=(
+            "Whether to inject top-level image fields into user messages as "
+            "OpenAI-compatible image_url content."
+        ),
+    )
+    model_group.add_argument(
+        "--image-field-names",
+        type=str,
+        nargs="+",
+        default=list(IMAGE_FIELD_NAMES),
+        help="Top-level JSONL fields to scan for VLM image paths or URLs.",
     )
 
     # sampling params
@@ -94,8 +116,8 @@ def parse_arguments():
     sampling_params_group.add_argument(
         "--max-tokens",
         type=int,
-        default=4096,
-        help="Maximum number of tokens (default: 4096)",
+        default=128000,
+        help="Maximum number of output tokens (default: 128000)",
     )
 
     # optimization
@@ -171,6 +193,129 @@ def compute_context_length(conversations: List[Dict[str, Any]]) -> int:
     return length
 
 
+def _extract_image_url_from_dict(value: Dict[str, Any]) -> Optional[str]:
+    if "url" in value and value["url"]:
+        return str(value["url"])
+    image_url = value.get("image_url")
+    if isinstance(image_url, dict) and image_url.get("url"):
+        return str(image_url["url"])
+    if isinstance(image_url, str) and image_url:
+        return image_url
+    for key in ("image", "image_path", "image_file", "path"):
+        if value.get(key):
+            return str(value[key])
+    return None
+
+
+def _normalize_image_values(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = value.strip()
+        return [value] if value else []
+    if isinstance(value, dict):
+        image_url = _extract_image_url_from_dict(value)
+        return [image_url] if image_url else []
+    if isinstance(value, (list, tuple)):
+        image_urls = []
+        for item in value:
+            image_urls.extend(_normalize_image_values(item))
+        return image_urls
+    return [str(value)]
+
+
+def get_image_urls(data: Dict[str, Any], image_field_names: List[str]) -> List[str]:
+    image_urls = []
+    for field_name in image_field_names:
+        if field_name not in data:
+            continue
+        image_urls.extend(_normalize_image_values(data[field_name]))
+        if image_urls:
+            break
+    return image_urls
+
+
+def _is_image_content_part(part: Any) -> bool:
+    return isinstance(part, dict) and part.get("type") in {"image", "image_url"}
+
+
+def conversations_have_images(messages: List[Dict[str, Any]]) -> bool:
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            _is_image_content_part(part) for part in content
+        ):
+            return True
+    return False
+
+
+def _normalize_content_part(part: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(part, str):
+        return {"type": "text", "text": part}
+    if not isinstance(part, dict):
+        return {"type": "text", "text": str(part)}
+
+    part_type = part.get("type")
+    if part_type == "text":
+        return {"type": "text", "text": str(part.get("text", ""))}
+    if part_type == "image_url":
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+            detail = image_url.get("detail")
+        else:
+            url = image_url
+            detail = None
+        if not url:
+            return None
+        normalized = {"type": "image_url", "image_url": {"url": str(url)}}
+        if detail:
+            normalized["image_url"]["detail"] = detail
+        return normalized
+    if part_type == "image":
+        url = part.get("image") or part.get("url")
+        if not url:
+            return None
+        return {"type": "image_url", "image_url": {"url": str(url)}}
+
+    return {"type": "text", "text": str(part.get("text", part))}
+
+
+def normalize_openai_message(message: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = {k: v for k, v in message.items() if k != "content"}
+    content = message.get("content", "")
+    if isinstance(content, list):
+        normalized_parts = [
+            normalized_part
+            for part in content
+            if (normalized_part := _normalize_content_part(part)) is not None
+        ]
+        normalized["content"] = normalized_parts
+    else:
+        normalized["content"] = content
+    return normalized
+
+
+def inject_images_into_user_message(
+    message: Dict[str, Any], image_urls: List[str]
+) -> Dict[str, Any]:
+    content = message.get("content", "")
+    image_parts = [
+        {"type": "image_url", "image_url": {"url": image_url}}
+        for image_url in image_urls
+    ]
+    if isinstance(content, list):
+        content_parts = image_parts + content
+    elif content:
+        content_parts = image_parts + [{"type": "text", "text": str(content)}]
+    else:
+        content_parts = image_parts
+
+    injected = dict(message)
+    injected["content"] = content_parts
+    return injected
+
+
 def build_query_kwargs(args, messages, max_tokens=None):
     effective_max_tokens = max_tokens if max_tokens is not None else args.max_tokens
 
@@ -200,14 +345,19 @@ def build_query_kwargs(args, messages, max_tokens=None):
 def call_sglang(
     args,
     server_address: str,
-    data: List[Dict[str, Any]],
+    data: Dict[str, Any],
     max_tokens=None,
-) -> str:
+) -> Dict[str, Any]:
     """Send a batch of prompts to sglang /v1/completions."""
     client = OpenAI(base_url=f"http://{server_address}/v1", api_key="None")
 
     messages = data["conversations"]
     regenerated_messages = []
+    image_urls = get_image_urls(data, args.image_field_names) if args.is_vlm else []
+    should_inject_images = (
+        args.is_vlm and image_urls and not conversations_have_images(messages)
+    )
+    injected_images = False
 
     # ignore data which starts with an assistant message
     if messages[0]["role"] == "assistant":
@@ -216,11 +366,15 @@ def call_sglang(
         return data
 
     for message in messages:
+        message = normalize_openai_message(message)
         if message["role"] == "system":
             regenerated_messages.append(message)
         elif message["role"] == "assistant":
             continue
         elif message["role"] == "user":
+            if should_inject_images and not injected_images:
+                message = inject_images_into_user_message(message, image_urls)
+                injected_images = True
             regenerated_messages.append(message)
 
             query_kwargs = build_query_kwargs(args, regenerated_messages, max_tokens)
