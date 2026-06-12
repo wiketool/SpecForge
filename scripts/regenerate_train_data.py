@@ -342,6 +342,86 @@ def build_query_kwargs(args, messages, max_tokens=None):
     return query_kwargs
 
 
+def build_error_record(
+    data: Dict[str, Any],
+    error: str,
+    failed_turn_index: Optional[int] = None,
+    failed_message_index: Optional[int] = None,
+    regenerated_turns: int = 0,
+    partial_success_written: bool = False,
+) -> Dict[str, Any]:
+    error_record = dict(data)
+    error_record["status"] = "error"
+    error_record["error"] = error
+    error_record["regenerated_turns"] = regenerated_turns
+    error_record["partial_success_written"] = partial_success_written
+    if failed_turn_index is not None:
+        error_record["failed_turn_index"] = failed_turn_index
+    if failed_message_index is not None:
+        error_record["failed_message_index"] = failed_message_index
+    return error_record
+
+
+def build_success_record(
+    data: Dict[str, Any],
+    conversations: List[Dict[str, Any]],
+    status: str,
+    regenerated_turns: int,
+    failed_turn_index: Optional[int] = None,
+    failed_message_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    success_record = dict(data)
+    success_record["conversations"] = conversations
+    success_record["status"] = status
+    success_record["regeneration_status"] = status
+    success_record["regenerated_turns"] = regenerated_turns
+    if failed_turn_index is not None:
+        success_record["failed_turn_index"] = failed_turn_index
+    if failed_message_index is not None:
+        success_record["failed_message_index"] = failed_message_index
+    return success_record
+
+
+def build_regeneration_result(
+    status: str,
+    data: Optional[Dict[str, Any]] = None,
+    error_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result = {"status": status}
+    if data is not None:
+        result["data"] = data
+    if error_data is not None:
+        result["error_data"] = error_data
+    return result
+
+
+def count_resume_error_samples(error_file_path: str) -> int:
+    """
+    Count error-only input rows for resume.
+
+    Partial successes write both one output row and one error record. The output
+    row already accounts for that input row, so those error records must not
+    increase the resume skip count.
+    """
+    if not os.path.exists(error_file_path):
+        return 0
+
+    count = 0
+    with open(error_file_path, "r") as error_file:
+        for line in error_file:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                count += 1
+                continue
+            if record.get("partial_success_written"):
+                continue
+            count += 1
+    return count
+
+
 def call_sglang(
     args,
     server_address: str,
@@ -361,17 +441,25 @@ def call_sglang(
 
     # ignore data which starts with an assistant message
     if messages[0]["role"] == "assistant":
-        data["status"] = "error"
-        data["error"] = "Data starts with an assistant message"
-        return data
+        error_record = build_error_record(
+            data,
+            "Data starts with an assistant message",
+            failed_turn_index=0,
+            failed_message_index=0,
+        )
+        return build_regeneration_result("error", error_data=error_record)
 
-    for message in messages:
+    regenerated_turns = 0
+    user_turn_index = 0
+    for message_index, message in enumerate(messages):
         message = normalize_openai_message(message)
         if message["role"] == "system":
             regenerated_messages.append(message)
         elif message["role"] == "assistant":
             continue
         elif message["role"] == "user":
+            user_turn_index += 1
+            prefix_len_before_user = len(regenerated_messages)
             if should_inject_images and not injected_images:
                 message = inject_images_into_user_message(message, image_urls)
                 injected_images = True
@@ -382,9 +470,29 @@ def call_sglang(
             try:
                 resp = client.chat.completions.create(**query_kwargs)
             except Exception as e:
-                data["status"] = "error"
-                data["error"] = str(e)
-                return data
+                error_record = build_error_record(
+                    data,
+                    str(e),
+                    failed_turn_index=user_turn_index,
+                    failed_message_index=message_index,
+                    regenerated_turns=regenerated_turns,
+                    partial_success_written=regenerated_turns > 0,
+                )
+                if regenerated_turns > 0:
+                    success_record = build_success_record(
+                        data,
+                        regenerated_messages[:prefix_len_before_user],
+                        "partial_success",
+                        regenerated_turns,
+                        failed_turn_index=user_turn_index,
+                        failed_message_index=message_index,
+                    )
+                    return build_regeneration_result(
+                        "partial_success",
+                        data=success_record,
+                        error_data=error_record,
+                    )
+                return build_regeneration_result("error", error_data=error_record)
             response_text = resp.choices[0].message.content
             resp_msg = {
                 "role": "assistant",
@@ -395,13 +503,36 @@ def call_sglang(
                     0
                 ].message.reasoning_content
             regenerated_messages.append(resp_msg)
+            regenerated_turns += 1
         else:
-            data["status"] = "error"
-            data["error"] = f"Invalid message role: {message['role']}"
-            return data
-    data["conversations"] = regenerated_messages
-    data["status"] = "success"
-    return data
+            error_record = build_error_record(
+                data,
+                f"Invalid message role: {message['role']}",
+                failed_turn_index=user_turn_index + 1,
+                failed_message_index=message_index,
+                regenerated_turns=regenerated_turns,
+                partial_success_written=regenerated_turns > 0,
+            )
+            if regenerated_turns > 0:
+                success_record = build_success_record(
+                    data,
+                    regenerated_messages,
+                    "partial_success",
+                    regenerated_turns,
+                    failed_turn_index=user_turn_index + 1,
+                    failed_message_index=message_index,
+                )
+                return build_regeneration_result(
+                    "partial_success", data=success_record, error_data=error_record
+                )
+            return build_regeneration_result("error", error_data=error_record)
+    success_record = build_success_record(
+        data,
+        regenerated_messages,
+        "success",
+        regenerated_turns,
+    )
+    return build_regeneration_result("success", data=success_record)
 
 
 def main():
@@ -432,13 +563,11 @@ def main():
 
     if args.resume and os.path.exists(args.output_file_path):
         existing_success = sum(1 for _ in open(args.output_file_path))
-        existing_error = 0
-        if os.path.exists(error_file_path):
-            existing_error = sum(1 for _ in open(error_file_path))
+        existing_error = count_resume_error_samples(error_file_path)
         skip_lines = existing_success + existing_error
         print(f"Resume mode enabled:")
         print(f"  Found {existing_success} successful samples in output file")
-        print(f"  Found {existing_error} error samples in error file")
+        print(f"  Found {existing_error} error-only samples in error file")
         print(f"  Skipping first {skip_lines} input samples")
         print("-" * 50)
 
@@ -484,6 +613,8 @@ def main():
     context_token_max = 0
     success_samples = 0
     error_samples = 0
+    partial_samples = 0
+    submitted_samples = 0
 
     # Create progress bar
     with (
@@ -500,6 +631,42 @@ def main():
         pbar = tqdm(total=total_lines, desc="Processing", initial=skip_lines)
         start_server_index = 0
 
+        def write_regeneration_result(regen_result: Dict[str, Any]) -> None:
+            nonlocal context_token_sum
+            nonlocal context_token_min
+            nonlocal context_token_max
+            nonlocal success_samples
+            nonlocal error_samples
+            nonlocal partial_samples
+
+            status = regen_result["status"]
+            success_data = regen_result.get("data")
+            error_data = regen_result.get("error_data")
+
+            if error_data is not None:
+                error_file_handle.write(
+                    json.dumps(error_data, ensure_ascii=False) + "\n"
+                )
+                error_samples += 1
+
+            if success_data is None:
+                return
+
+            ctx_len = compute_context_length(success_data.get("conversations", []))
+            context_token_sum += ctx_len
+            if context_token_min is None:
+                context_token_min = ctx_len
+            else:
+                context_token_min = min(context_token_min, ctx_len)
+            context_token_max = max(context_token_max, ctx_len)
+
+            output_file_handle.write(
+                json.dumps(success_data, ensure_ascii=False) + "\n"
+            )
+            success_samples += 1
+            if status == "partial_success":
+                partial_samples += 1
+
         if skip_lines > 0:
             print(f"Skipping {skip_lines} already processed samples...")
             for _ in range(skip_lines):
@@ -507,10 +674,7 @@ def main():
             print(f"Resuming from sample {skip_lines + 1}")
 
         for line in input_file:
-            if (
-                args.num_samples is not None
-                and success_samples + error_samples >= args.num_samples
-            ):
+            if args.num_samples is not None and submitted_samples >= args.num_samples:
                 break
 
             data = json.loads(line.strip())
@@ -525,28 +689,7 @@ def main():
                 # check if any future is done, if so, write the result to the output file
                 for req_future in waiting_queue[server_address]:
                     if req_future.done():
-                        regen_data = req_future.result()
-
-                        if regen_data["status"] == "error":
-                            error_file_handle.write(
-                                json.dumps(regen_data, ensure_ascii=False) + "\n"
-                            )
-                            error_samples += 1
-                        else:
-                            ctx_len = compute_context_length(
-                                regen_data.get("conversations", [])
-                            )
-                            context_token_sum += ctx_len
-                            if context_token_min is None:
-                                context_token_min = ctx_len
-                            else:
-                                context_token_min = min(context_token_min, ctx_len)
-                            context_token_max = max(context_token_max, ctx_len)
-
-                            output_file_handle.write(
-                                json.dumps(regen_data, ensure_ascii=False) + "\n"
-                            )
-                            success_samples += 1
+                        write_regeneration_result(req_future.result())
                         waiting_queue[server_address].remove(req_future)
                         finished_on_request = True
 
@@ -560,32 +703,13 @@ def main():
                 data,
             )
             waiting_queue[server_address].append(req_future)
+            submitted_samples += 1
             pbar.update(1)
 
         # deal with all the remaining requests
         for server_address, waiting_queue_items in waiting_queue.items():
             for req_future in waiting_queue_items:
-                regen_data = req_future.result()
-                if regen_data["status"] == "error":
-                    error_file_handle.write(
-                        json.dumps(regen_data, ensure_ascii=False) + "\n"
-                    )
-                    error_samples += 1
-                else:
-                    ctx_len = compute_context_length(
-                        regen_data.get("conversations", [])
-                    )
-                    context_token_sum += ctx_len
-                    if context_token_min is None:
-                        context_token_min = ctx_len
-                    else:
-                        context_token_min = min(context_token_min, ctx_len)
-                    context_token_max = max(context_token_max, ctx_len)
-
-                    output_file_handle.write(
-                        json.dumps(regen_data, ensure_ascii=False) + "\n"
-                    )
-                    success_samples += 1
+                write_regeneration_result(req_future.result())
 
     print(f"\nProcessing completed!")
     if success_samples > 0:
@@ -598,17 +722,19 @@ def main():
     else:
         print("No successful examples to compute context length statistics.")
 
-    total_processed = success_samples + error_samples
     if skip_lines > 0:
         print(f"\nResume processing completed!")
         print(f"  Previously processed: {skip_lines}")
         print(
-            f"  Newly processed: {total_processed} ({success_samples} success, {error_samples} failed)"
+            f"  Newly processed input rows: {submitted_samples}"
+            f" ({success_samples} output rows, {partial_samples} partial, {error_samples} error records)"
         )
-        print(f"  Total: {skip_lines + total_processed}")
+        print(f"  Total input rows accounted: {skip_lines + submitted_samples}")
     else:
         print(
-            f"\nProcessing completed! {success_samples} samples regenerated, {error_samples} samples failed."
+            f"\nProcessing completed! {submitted_samples} input rows processed, "
+            f"{success_samples} output rows, {partial_samples} partial successes, "
+            f"{error_samples} error records."
         )
 
 
