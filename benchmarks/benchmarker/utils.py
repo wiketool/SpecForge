@@ -40,32 +40,38 @@ def compute_metrics(
     Returns:
         BenchmarkMetrics object with computed metrics
     """
+    def get_meta(state: Any, key: str) -> Dict[str, Any]:
+        try:
+            return state.get_meta_info(key) or {}
+        except KeyError:
+            return {}
+
     # Compute output tokens
     num_output_tokens = 0
     if additional_answer_keys:
         for key in [answer_key] + additional_answer_keys:
             num_output_tokens += sum(
-                s.get_meta_info(key)["completion_tokens"] for s in states
+                get_meta(s, key).get("completion_tokens", 0) for s in states
             )
     else:
         num_output_tokens = sum(
-            s.get_meta_info(answer_key)["completion_tokens"] for s in states
+            get_meta(s, answer_key).get("completion_tokens", 0) for s in states
         )
 
     output_throughput = num_output_tokens / latency if latency > 0 else 0.0
 
     # Compute accept length (speculative decoding metric)
-    has_verify = "spec_verify_ct" in states[0].get_meta_info(answer_key)
+    has_verify = bool(states) and "spec_verify_ct" in get_meta(states[0], answer_key)
     if has_verify:
         num_verify_tokens = 0
         if additional_answer_keys:
             for key in [answer_key] + additional_answer_keys:
                 num_verify_tokens += sum(
-                    s.get_meta_info(key).get("spec_verify_ct", 0) for s in states
+                    get_meta(s, key).get("spec_verify_ct", 0) for s in states
                 )
         else:
             num_verify_tokens = sum(
-                s.get_meta_info(answer_key).get("spec_verify_ct", 0) for s in states
+                get_meta(s, answer_key).get("spec_verify_ct", 0) for s in states
             )
 
         if num_verify_tokens == 0:

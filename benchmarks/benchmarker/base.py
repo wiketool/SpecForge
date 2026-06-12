@@ -167,8 +167,12 @@ class Benchmarker(ABC):
             predictions = []
             primary_answer_key = answer_keys[0] if answer_keys else "answer"
             for i in range(len(states)):
-                # Access answer from state object (states[i] supports dict-like access)
-                output = states[i][primary_answer_key]
+                # A failed per-sample generation may leave the answer key unset.
+                # Count it as an invalid prediction instead of failing the whole run.
+                try:
+                    output = states[i][primary_answer_key]
+                except KeyError:
+                    output = ""
                 if isinstance(output, str):
                     extracted = self.extract_answer(
                         output,
