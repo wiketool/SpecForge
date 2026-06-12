@@ -54,6 +54,10 @@ from specforge.utils import (
     rank_0_priority,
     safe_conversations_generator,
 )
+from specforge.vlm_sharding import (
+    get_tp_data_shard,
+    get_tp_image_grid_thw_shard,
+)
 
 
 def print_cuda_memory_debug(label: str) -> None:
@@ -435,8 +439,6 @@ def sanity_check(args: Namespace) -> None:
     if args.shard_target_output:
         if args.target_model_backend != "sglang":
             raise ValueError("shard_target_output is only supported for sglang backend")
-        if args.is_vlm:
-            raise ValueError("shard_target_output is only supported non vlm model")
 
 
 def sp_sanity_check(args: Namespace) -> None:
@@ -765,6 +767,7 @@ def run_forward(
                     is_vlm=args.is_vlm,
                     pixel_values=pixel_values,
                     image_grid_thw=image_grid_thw,
+                    shard_returns=args.shard_target_output,
                 )
             else:
                 eagle3_data = target_model.generate_eagle3_data(
@@ -789,6 +792,12 @@ def run_forward(
             hidden_states = get_dp_data_shard_from_tp(
                 eagle3_data.hidden_states, args.shard_target_output
             )
+            if args.is_vlm:
+                image_grid_thw = get_dp_image_grid_thw_shard_from_tp(
+                    image_grid_thw,
+                    batch_size=eagle3_data.input_ids.shape[0],
+                    sharded=args.shard_target_output,
+                )
         else:
             # we generate the logits using the hidden states loaded from disk
             attention_mask = data["attention_mask"].cuda()
@@ -958,6 +967,11 @@ def get_progress_metrics(
     return loss.item(), acc.item(), last_grad_norm
 
 
+def get_tp_size_and_rank() -> Tuple[int, int]:
+    tp_group = get_tp_group()
+    return dist.get_world_size(tp_group), dist.get_rank(tp_group)
+
+
 def get_dp_data_shard_from_tp(
     tensor: torch.Tensor, sharded: bool = False
 ) -> torch.Tensor:
@@ -966,9 +980,35 @@ def get_dp_data_shard_from_tp(
     """
     if sharded:
         return tensor
-    tp_size = dist.get_world_size(get_tp_group())
-    tp_rank = dist.get_rank(get_tp_group())
-    return tensor.chunk(tp_size, dim=0)[tp_rank]
+    tp_size, tp_rank = get_tp_size_and_rank()
+    return get_tp_data_shard(
+        tensor, tp_size=tp_size, tp_rank=tp_rank, sharded=sharded
+    )
+
+
+def get_dp_image_grid_thw_shard_from_tp(
+    image_grid_thw: Optional[
+        Union[torch.Tensor, List[Optional[torch.Tensor]], Tuple]
+    ],
+    batch_size: int,
+    sharded: bool = False,
+) -> Optional[torch.Tensor]:
+    if sharded:
+        return get_tp_image_grid_thw_shard(
+            image_grid_thw,
+            batch_size=batch_size,
+            tp_size=1,
+            tp_rank=0,
+            sharded=True,
+        )
+    tp_size, tp_rank = get_tp_size_and_rank()
+    return get_tp_image_grid_thw_shard(
+        image_grid_thw,
+        batch_size=batch_size,
+        tp_size=tp_size,
+        tp_rank=tp_rank,
+        sharded=sharded,
+    )
 
 
 def main():

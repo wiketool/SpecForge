@@ -591,6 +591,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
         loss_mask: torch.Tensor,
         return_last_hidden_states: bool = False,
         return_logits: bool = True,
+        shard_returns: bool = False,
         pixel_values: Optional[List[torch.Tensor]] = None,
         image_grid_thw: Optional[List[torch.Tensor]] = None,
     ):
@@ -762,6 +763,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
             capture_aux_hidden_states=True,
             return_last_hidden_states=return_last_hidden_states,
             return_logits=return_logits,
+            shard_returns=shard_returns,
         )
 
         return data_cache, logits_list, aux_hidden_states_list, last_hidden_states_list
@@ -800,6 +802,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
                     loss_mask,
                     return_last_hidden_states=False,
                     return_logits=True,
+                    shard_returns=shard_returns,
                     pixel_values=pixel_values,
                     image_grid_thw=image_grid_thw,
                 )

@@ -67,6 +67,52 @@ class TestLKLossUtils(unittest.TestCase):
         self.assertLessEqual(acceptance.item(), 1.0)
         self.assertTrue(torch.isfinite(log_acceptance))
 
+    def test_compute_acceptance_rate_chunked_matches_full(self):
+        logits = torch.tensor(
+            [
+                [
+                    [2.0, 0.0, -1.0],
+                    [0.0, 2.0, -1.0],
+                    [1.0, 1.0, 0.0],
+                    [-1.0, 0.0, 2.0],
+                    [0.5, -0.5, 1.5],
+                ]
+            ],
+            dtype=torch.float32,
+        )
+        target_probs = torch.softmax(
+            torch.tensor(
+                [
+                    [
+                        [1.0, 0.0, -1.0],
+                        [0.0, 1.0, -1.0],
+                        [0.5, 0.5, 0.0],
+                        [-0.5, 0.0, 1.0],
+                        [0.0, -1.0, 1.0],
+                    ]
+                ],
+                dtype=torch.float32,
+            ),
+            dim=-1,
+        )
+        position_mask = torch.tensor([[[1], [1], [0], [1], [1]]], dtype=torch.bool)
+
+        full = compute_acceptance_rate(
+            logits=logits,
+            target_probs=target_probs,
+            position_mask=position_mask,
+            chunk_tokens=0,
+        )
+        chunked = compute_acceptance_rate(
+            logits=logits,
+            target_probs=target_probs,
+            position_mask=position_mask,
+            chunk_tokens=2,
+        )
+
+        torch.testing.assert_close(chunked[0], full[0])
+        torch.testing.assert_close(chunked[1], full[1])
+
     def test_compute_acceptance_rate_log_before_mean(self):
         logits = torch.tensor(
             [[[2.0, 0.0], [0.0, 2.0], [1.0, 1.0]]], dtype=torch.float32
