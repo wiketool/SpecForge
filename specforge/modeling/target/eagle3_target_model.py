@@ -725,7 +725,6 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
                 mm_item = MultimodalDataItem(
                     modality=Modality.IMAGE,
                     feature=pixel_value_,  # torch.Tensor: (num_patches, patch_dim)
-                    pad_value=self.image_token_id,  # Required for placeholder tensor creation
                     offsets=offset,  # List of (start, end) tuples
                 )
                 mm_item.set("image_grid_thw", image_grid_thw_.cpu())
