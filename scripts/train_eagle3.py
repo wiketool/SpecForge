@@ -415,7 +415,15 @@ def build_target_model(
             cache_dir=args.model_download_dir,
             trust_remote_code=args.trust_remote_code,
         )
-        return target_head, None
+        if args.is_vlm:
+            processor = AutoProcessor.from_pretrained(
+                args.target_model_path,
+                min_pixels=args.min_pixels,
+                max_pixels=args.max_pixels,
+            )
+        else:
+            processor = None
+        return target_head, processor
 
 
 def sanity_check(args: Namespace) -> None:

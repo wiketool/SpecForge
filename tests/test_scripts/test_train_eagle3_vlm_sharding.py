@@ -14,6 +14,7 @@ TARGET_MODEL_PATH = (
     / "target"
     / "eagle3_target_model.py"
 )
+TRAIN_SCRIPT_PATH = Path(__file__).parents[2] / "scripts" / "train_eagle3.py"
 SPEC = importlib.util.spec_from_file_location("vlm_sharding", MODULE_PATH)
 vlm_sharding = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(vlm_sharding)
@@ -119,6 +120,22 @@ class TestTrainEagle3VlmSharding(unittest.TestCase):
         self.assertIsNotNone(shard_kw)
         self.assertIsInstance(shard_kw.value, ast.Name)
         self.assertEqual(shard_kw.value.id, "shard_returns")
+
+    def test_offline_vlm_build_target_model_keeps_processor(self):
+        tree = ast.parse(TRAIN_SCRIPT_PATH.read_text())
+        build_target_model = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "build_target_model"
+        )
+        source = ast.get_source_segment(
+            TRAIN_SCRIPT_PATH.read_text(), build_target_model
+        )
+
+        self.assertIn("TargetHead.from_pretrained", source)
+        self.assertIn("if args.is_vlm:", source)
+        self.assertIn("AutoProcessor.from_pretrained", source)
+        self.assertIn("return target_head, processor", source)
 
 
 if __name__ == "__main__":
