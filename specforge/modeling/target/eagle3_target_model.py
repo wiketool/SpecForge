@@ -7,6 +7,7 @@ import sglang.srt.managers.mm_utils as mm_utils
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 from sglang.srt.managers.mm_utils import (
@@ -50,6 +51,7 @@ class Eagle3TargetOutput:
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
     last_hidden_states: Optional[torch.Tensor] = None
+    position_ids: Optional[torch.Tensor] = None
 
 
 def _to_cpu(value):
@@ -605,7 +607,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
         """
         mm_utils.embedding_cache.clear()
         sampling_params = SamplingParams(temperature=0, max_new_tokens=1, top_k=1)
-        reqs, data_cache = [], []
+        reqs, data_cache, mrope_positions_cache = [], [], []
 
         # Split tensors if needed
         if isinstance(input_ids, torch.Tensor):
@@ -714,6 +716,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
                 image_grid_thw=(
                     image_grid_thw_.cpu() if image_grid_thw_ is not None else None
                 ),
+                attention_mask=attention_mask_.cpu(),
                 tokens_per_second=self.tokens_per_second,
             )
 
@@ -756,6 +759,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
             if mm_inputs is not None:
                 req.multimodal_inputs = mm_inputs
             data_cache.append([input_id_, attention_mask_, loss_mask_])
+            mrope_positions_cache.append(mrope_positions)
             reqs.append(req)
 
         logits_list, aux_hidden_states_list, last_hidden_states_list = self._extend(
@@ -766,7 +770,13 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
             shard_returns=shard_returns,
         )
 
-        return data_cache, logits_list, aux_hidden_states_list, last_hidden_states_list
+        return (
+            data_cache,
+            logits_list,
+            aux_hidden_states_list,
+            last_hidden_states_list,
+            mrope_positions_cache,
+        )
 
     @torch.no_grad()
     def generate_eagle3_data(
@@ -795,17 +805,21 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
             logger.debug(f"unused kwargs {list(kwargs.keys())}")
 
         if is_vlm:
-            data_cache, logits_list, aux_hidden_states_list, last_hidden_states_list = (
-                self.extend_vlm(
-                    input_ids,
-                    attention_mask,
-                    loss_mask,
-                    return_last_hidden_states=False,
-                    return_logits=True,
-                    shard_returns=shard_returns,
-                    pixel_values=pixel_values,
-                    image_grid_thw=image_grid_thw,
-                )
+            (
+                data_cache,
+                logits_list,
+                aux_hidden_states_list,
+                last_hidden_states_list,
+                position_ids_list,
+            ) = self.extend_vlm(
+                input_ids,
+                attention_mask,
+                loss_mask,
+                return_last_hidden_states=False,
+                return_logits=True,
+                shard_returns=shard_returns,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
             )
         else:
             data_cache, logits_list, aux_hidden_states_list, last_hidden_states_list = (
@@ -818,16 +832,28 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
                     shard_returns=shard_returns,
                 )
             )
+            position_ids_list = [None] * len(data_cache)
         aux_hidden_states_out = []
         target_out = []
         loss_mask_out = []
         attention_mask_out = []
         input_ids_out = []
         last_hidden_states_out = []
+        position_ids_out = []
 
-        for idx, (data, logits, aux_hidden_states, last_hidden_states) in enumerate(
+        for idx, (
+            data,
+            logits,
+            aux_hidden_states,
+            last_hidden_states,
+            position_ids,
+        ) in enumerate(
             zip(
-                data_cache, logits_list, aux_hidden_states_list, last_hidden_states_list
+                data_cache,
+                logits_list,
+                aux_hidden_states_list,
+                last_hidden_states_list,
+                position_ids_list,
             )
         ):
             if aux_hidden_states is not None:
@@ -835,6 +861,8 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
                 loss_mask_out.append(data[2])
                 attention_mask_out.append(data[1])
                 input_ids_out.append(data[0])
+                if position_ids is not None:
+                    position_ids_out.append(position_ids)
 
             # when generating hidden states for offline training, we don't compute logits and only keep the last_hidden_states
             # when training online, we don't keep the last_hidden_states and only keep the logits
@@ -860,6 +888,18 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
         else:
             last_hidden_states_out = None
 
+        if position_ids_out:
+            max_position_len = max(item.shape[-1] for item in position_ids_out)
+            position_ids_out = torch.cat(
+                [
+                    F.pad(item.long(), (0, max_position_len - item.shape[-1]))
+                    for item in position_ids_out
+                ],
+                dim=1,
+            )
+        else:
+            position_ids_out = None
+
         target_out = padding(target_out, left=False)
         input_ids_out = padding(input_ids_out, left=False)
         loss_mask_out = loss_mask_out[..., None]
@@ -871,6 +911,7 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
             input_ids=input_ids_out,
             attention_mask=attention_mask_out,
             last_hidden_states=last_hidden_states_out,
+            position_ids=position_ids_out,
         )
 
 

@@ -14,7 +14,7 @@ from specforge.distributed import get_draft_sp_group, get_sp_ulysses_group
 class StepState:
     input_ids: torch.Tensor
     hidden_states: torch.Tensor
-    position_ids: torch.Tensor
+    position_ids: Optional[torch.Tensor]
     attention_mask: torch.Tensor
     target_p: torch.Tensor
     target_p_on_draft: torch.Tensor
@@ -103,6 +103,21 @@ class UspAdapter(BackendAdapter):
         self.ulysses_pg = get_sp_ulysses_group()
         self.sp_ulysses_degree = dist.get_world_size(self.ulysses_pg)
 
+    @staticmethod
+    def _all_gather_seq_last(
+        tensor: Optional[torch.Tensor], group: dist.ProcessGroup
+    ) -> Optional[torch.Tensor]:
+        if tensor is None:
+            return None
+        world_size = dist.get_world_size(group)
+        if world_size == 1:
+            return tensor.contiguous()
+
+        tensor = tensor.contiguous()
+        gathered = [torch.empty_like(tensor) for _ in range(world_size)]
+        dist.all_gather(gathered, tensor, group=group)
+        return torch.cat(gathered, dim=-1).contiguous()
+
     def step_view(
         self,
         *,
@@ -132,10 +147,25 @@ class UspAdapter(BackendAdapter):
         target_p = target_p_padded[:, idx : idx + usp_chunk_size, :]
         target_p_on_draft = target_p_on_draft_padded[:, idx : idx + usp_chunk_size, :]
         target_token_ids = target_token_ids_padded[:, idx : idx + usp_chunk_size]
+        expanded_position_len = usp_chunk_size * self.sp_ulysses_degree
+        if position_ids is None:
+            step_position_ids = None
+        elif position_ids.shape[-1] >= expanded_position_len:
+            step_position_ids = position_ids[..., :expanded_position_len].contiguous()
+        elif position_ids.shape[-1] == usp_chunk_size:
+            step_position_ids = self._all_gather_seq_last(
+                position_ids[..., :usp_chunk_size], self.ulysses_pg
+            )
+        else:
+            raise ValueError(
+                "USP position_ids must either already match the Ulysses-expanded "
+                f"sequence length ({expanded_position_len}) or the local chunk "
+                f"length ({usp_chunk_size}); got shape {tuple(position_ids.shape)}."
+            )
         return StepState(
             input_ids=global_input_ids[:, :usp_chunk_size],
             hidden_states=hidden_states[:, :usp_chunk_size, :],
-            position_ids=position_ids[:, : usp_chunk_size * self.sp_ulysses_degree],
+            position_ids=step_position_ids,
             attention_mask=attention_mask[:, :usp_chunk_size],
             target_p=target_p,
             target_p_on_draft=target_p_on_draft,

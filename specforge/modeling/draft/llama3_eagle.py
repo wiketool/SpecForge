@@ -1345,10 +1345,6 @@ class LlamaUSPFlashAttention(LlamaAttention):
         assert (
             dist.is_initialized()
         ), f"LlamaUSPAttention requires torch.distributed; call init_distributed first."
-        if isinstance(self.rotary_emb, LlamaMutiRotaryEmbedding):
-            raise NotImplementedError(
-                f"LlamaMutiRotaryEmbedding is currently not supported for LlamaUSPFlashAttention."
-            )
         self.ring_pg = get_sp_ring_group()
         self.ulysses_pg = get_sp_ulysses_group()
         self.sp_ring_degree = torch.distributed.get_world_size(self.ring_pg)
@@ -1417,11 +1413,54 @@ class LlamaUSPFlashAttention(LlamaAttention):
         # =============================================================
         lck = 0 if cache_hidden is None else len(cache_hidden[0])
 
-        cos, sin = self.rotary_emb(query_states, seq_len=global_q_len + lck)
-        cos, sin = cos.to(query_states.device), sin.to(query_states.device)
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin, position_ids + lck, unsqueeze_dim=2
-        )
+        if isinstance(self.rotary_emb, LlamaMutiRotaryEmbedding):
+            if position_ids is None:
+                raise ValueError("MRoPE USP attention requires position_ids.")
+            if position_ids.dim() == 2 and position_ids.shape[0] == 3:
+                position_ids = position_ids.unsqueeze(1)
+            if position_ids.dim() != 3 or position_ids.shape[0] != 3:
+                raise ValueError(
+                    "MRoPE USP attention expects position_ids with shape "
+                    f"[3, batch, seq], got {tuple(position_ids.shape)}."
+                )
+            if position_ids.shape[1] != bsz:
+                if position_ids.shape[1] == 1:
+                    position_ids = position_ids.expand(-1, bsz, -1)
+                else:
+                    raise ValueError(
+                        "MRoPE USP position_ids batch dimension does not match "
+                        f"hidden_states: position_ids={tuple(position_ids.shape)}, "
+                        f"batch={bsz}."
+                    )
+            if position_ids.shape[-1] != query_states.shape[1]:
+                raise ValueError(
+                    "MRoPE USP position_ids seq dimension must match the "
+                    "Ulysses-expanded query length: "
+                    f"position_ids={tuple(position_ids.shape)}, "
+                    f"query_states={tuple(query_states.shape)}."
+                )
+            position_ids = position_ids.to(device=query_states.device, dtype=torch.long)
+            cos, sin = self.rotary_emb(query_states, position_ids + lck)
+            cos, sin = cos.to(query_states.device), sin.to(query_states.device)
+            query_states, key_states = apply_multimodal_rotary_pos_emb(
+                query_states,
+                key_states,
+                cos,
+                sin,
+                self.config.rope_scaling["mrope_section"],
+                unsqueeze_dim=2,
+            )
+        else:
+            cos, sin = self.rotary_emb(query_states, seq_len=global_q_len + lck)
+            cos, sin = cos.to(query_states.device), sin.to(query_states.device)
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states,
+                key_states,
+                cos,
+                sin,
+                position_ids + lck,
+                unsqueeze_dim=2,
+            )
 
         # Update Cache (Eagle3 Logic: Cache is a list of tensors for tree branches)
         if cache_hidden is not None:

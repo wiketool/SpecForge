@@ -72,6 +72,7 @@ class DataPoint:
     loss_mask: torch.Tensor
     hidden_state: torch.Tensor
     aux_hidden_state: Optional[torch.Tensor] = None
+    position_ids: Optional[torch.Tensor] = None
 
 
 def parse_args():
@@ -166,40 +167,24 @@ def build_target_model(
     """
     Build the target model according to the arguments.
 
-    For VLM models (Qwen2.5-VL) without TP, load directly from transformers.
-    Otherwise, use the Eagle3 target model wrapper.
+    Use the Eagle3 target model wrapper for both text and VLM models. The VLM
+    offline path relies on the wrapper's SGLang request construction and MRoPE
+    position-id export.
     """
-    if args.is_vlm and model_config.model_type == "qwen2_5_vl" and args.tp_size == 1:
-        # TODO: replace with sglang
-        from transformers import Qwen2_5_VLForConditionalGeneration
-
-        target_model = (
-            Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                pretrained_model_name_or_path=args.target_model_path,
-                torch_dtype=(
-                    model_config.dtype
-                    if hasattr(model_config, "dtype")
-                    else model_config.torch_dtype
-                ),
-            )
-            .eval()
-            .cuda()
-        )
-    else:
-        target_model_kwargs = SGLangBackendArgs.from_args(args).to_kwargs()
-        target_model = get_eagle3_target_model(
-            pretrained_model_name_or_path=args.target_model_path,
-            backend="sglang",  # we set this as the default backend to minimize precision mismatch in training and serving
-            torch_dtype=(
-                model_config.dtype
-                if hasattr(model_config, "dtype")
-                else model_config.torch_dtype
-            ),
-            device="cuda",
-            cache_dir=args.model_download_dir,
-            trust_remote_code=args.trust_remote_code,
-            **target_model_kwargs,
-        )
+    target_model_kwargs = SGLangBackendArgs.from_args(args).to_kwargs()
+    target_model = get_eagle3_target_model(
+        pretrained_model_name_or_path=args.target_model_path,
+        backend="sglang",  # we set this as the default backend to minimize precision mismatch in training and serving
+        torch_dtype=(
+            model_config.dtype
+            if hasattr(model_config, "dtype")
+            else model_config.torch_dtype
+        ),
+        device="cuda",
+        cache_dir=args.model_download_dir,
+        trust_remote_code=args.trust_remote_code,
+        **target_model_kwargs,
+    )
     # Set auxiliary hidden states layers if specified
     target_model.set_aux_hidden_states_layers(args.aux_hidden_states_layers)
 
@@ -225,6 +210,7 @@ class HiddenStatesGenerator:
         self,
         target_model,
         enable_aux_hidden_states: bool = True,
+        is_vlm: bool = False,
         num_io_threads: int = 4,
         io_queue_size: int = 50,
         file_group_size: int = 2000,
@@ -241,6 +227,7 @@ class HiddenStatesGenerator:
         """
         self.model = target_model
         self.enable_aux_hidden_states = enable_aux_hidden_states
+        self.is_vlm = is_vlm
 
         # --- Configurable parameters ---
         self.num_io_threads = num_io_threads
@@ -402,6 +389,58 @@ class HiddenStatesGenerator:
             exists = list(executor.map(check_single_file, global_indices))
         return exists
 
+    @staticmethod
+    def _move_image_grid_thw_to_cuda(image_grid_thw):
+        if image_grid_thw is None:
+            return None
+        out = []
+        for item in image_grid_thw:
+            if isinstance(item, torch.Tensor) and item.numel() > 0:
+                out.append(item.cuda(non_blocking=True))
+            else:
+                out.append(None)
+        return out if any(item is not None for item in out) else None
+
+    @staticmethod
+    def _filter_vlm_inputs(batch, valid_indices):
+        image_grid_thw = batch.get("image_grid_thw")
+        pixel_values = batch.get("pixel_values")
+        if image_grid_thw is None:
+            return None, None
+
+        valid_set = set(valid_indices)
+        selected_grids = []
+        selected_pixels = []
+        pixel_offset = 0
+        for idx, grid in enumerate(image_grid_thw):
+            if isinstance(grid, torch.Tensor) and grid.numel() > 0:
+                grid_2d = grid.reshape(-1, 3)
+                num_patches = int(
+                    (grid_2d[:, 0] * grid_2d[:, 1] * grid_2d[:, 2]).sum().item()
+                )
+                pixel_slice = (
+                    pixel_values[pixel_offset : pixel_offset + num_patches]
+                    if isinstance(pixel_values, torch.Tensor)
+                    else None
+                )
+                pixel_offset += num_patches
+            else:
+                grid_2d = None
+                num_patches = 0
+                pixel_slice = None
+
+            if idx in valid_set:
+                selected_grids.append(grid_2d)
+                if num_patches > 0 and pixel_slice is not None:
+                    selected_pixels.append(pixel_slice)
+
+        if selected_pixels:
+            pixel_values = torch.cat(selected_pixels, dim=0)
+        else:
+            pixel_values = None
+
+        return pixel_values, selected_grids
+
     def _get_file_path(
         self, output_path: str, idx: int, extension: Optional[str] = None
     ) -> str:
@@ -488,6 +527,12 @@ class HiddenStatesGenerator:
                 "attention_mask": batch["attention_mask"][valid_indices_in_batch],
                 "loss_mask": batch["loss_mask"][valid_indices_in_batch],
             }
+            if self.is_vlm:
+                pixel_values, image_grid_thw = self._filter_vlm_inputs(
+                    batch, valid_indices_in_batch
+                )
+                filtered_batch["pixel_values"] = pixel_values
+                filtered_batch["image_grid_thw"] = image_grid_thw
             del batch
             if num_valid == 0:
                 # Data has already been generated, no sample processing, update progress bar.
@@ -504,13 +549,35 @@ class HiddenStatesGenerator:
                 continue
 
             filtered_batch_gpu = {
-                k: v.cuda(non_blocking=True) for k, v in filtered_batch.items()
+                k: v.cuda(non_blocking=True)
+                for k, v in filtered_batch.items()
+                if isinstance(v, torch.Tensor)
             }
-            _, _, aux_hidden_states_list, last_hidden_states_list = self.model.extend(
-                **filtered_batch_gpu,
-                return_last_hidden_states=True,
-                return_logits=False,
-            )
+            if self.is_vlm:
+                image_grid_thw = self._move_image_grid_thw_to_cuda(
+                    filtered_batch.get("image_grid_thw")
+                )
+                (
+                    _,
+                    _,
+                    aux_hidden_states_list,
+                    last_hidden_states_list,
+                    position_ids_list,
+                ) = self.model.extend_vlm(
+                    **filtered_batch_gpu,
+                    image_grid_thw=image_grid_thw,
+                    return_last_hidden_states=True,
+                    return_logits=False,
+                )
+            else:
+                _, _, aux_hidden_states_list, last_hidden_states_list = (
+                    self.model.extend(
+                        **filtered_batch_gpu,
+                        return_last_hidden_states=True,
+                        return_logits=False,
+                    )
+                )
+                position_ids_list = [None] * len(aux_hidden_states_list)
 
             del filtered_batch_gpu
 
@@ -519,11 +586,13 @@ class HiddenStatesGenerator:
                     current_global_idx,
                     aux_hidden_states,
                     last_hidden_states,
+                    position_ids,
                 ) in enumerate(
                     zip(
                         sample_global_indices,
                         aux_hidden_states_list,
                         last_hidden_states_list,
+                        position_ids_list,
                     )
                 ):
 
@@ -539,11 +608,17 @@ class HiddenStatesGenerator:
                         if last_hidden_states is not None
                         else None
                     )
+                    position_ids = (
+                        position_ids.cpu().clone()
+                        if position_ids is not None
+                        else None
+                    )
                     data_point = DataPoint(
                         input_ids=filtered_batch["input_ids"][i].clone(),
                         loss_mask=filtered_batch["loss_mask"][i].clone(),
                         hidden_state=last_hidden_states,
                         aux_hidden_state=aux_hidden_states,
+                        position_ids=position_ids,
                     )
 
                     # 3. Save asynchronously (the backpressure logic is still crucial)
@@ -551,12 +626,17 @@ class HiddenStatesGenerator:
                     self._save_tensor_async(data_point, output_file)
 
                     # 4. Immediately clean up the single-sample CPU tensors
-                    del last_hidden_states, aux_hidden_states
+                    del last_hidden_states, aux_hidden_states, position_ids
 
                 total_processed += len(sample_global_indices)
 
             # Clean up the large GPU and CPU batch data
-            del aux_hidden_states_list, last_hidden_states_list, filtered_batch
+            del (
+                aux_hidden_states_list,
+                last_hidden_states_list,
+                position_ids_list,
+                filtered_batch,
+            )
 
             if batch_idx % 5 == 0:  # Make GC and cache clearing more frequent
                 torch.cuda.empty_cache()
@@ -694,6 +774,7 @@ def main():
         with HiddenStatesGenerator(
             target_model,
             enable_aux_hidden_states=args.enable_aux_hidden_states,
+            is_vlm=args.is_vlm,
             num_io_threads=args.num_io_threads,
             io_queue_size=args.io_queue_size,
             file_group_size=args.file_group_size,

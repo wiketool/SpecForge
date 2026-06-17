@@ -330,7 +330,12 @@ def preprocess_vlm_conversations(
             else:
                 messages.append({"role": role, "content": sentence["content"]})
 
-        conversation = processor.tokenizer.apply_chat_template(
+        template_source = (
+            processor
+            if hasattr(processor, "apply_chat_template")
+            else processor.tokenizer
+        )
+        conversation = template_source.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=False,
@@ -695,6 +700,22 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
                     sliced = F.pad(sliced, (0, 0, 0, pad_len))
             return sliced.contiguous(), valid_len
 
+        def _slice_and_pad_position_ids(tensor):
+            if tensor.ndim == 1:
+                tensor = tensor.unsqueeze(0)
+            if tensor.ndim == 2 and tensor.shape[0] == 3:
+                tensor = tensor.unsqueeze(1)
+            if tensor.ndim not in (2, 3):
+                raise ValueError(
+                    f"Unsupported position_ids shape for USP preprocessing: {tuple(tensor.shape)}"
+                )
+            tensor = tensor[..., :global_len]
+            sliced = tensor[..., start : min(end, tensor.shape[-1])]
+            valid_len = sliced.shape[-1]
+            if valid_len < local_len:
+                sliced = F.pad(sliced, (0, local_len - valid_len))
+            return sliced.contiguous(), valid_len
+
         if "aux_hidden_state" not in data or data["aux_hidden_state"] is None:
             raise KeyError("aux_hidden_state is required for OfflineEagle3Dataset")
         new_data["hidden_state"], _ = _slice_and_pad(data["aux_hidden_state"])
@@ -722,9 +743,24 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
         usp_chunk_size = max(local_len - ttt_length, 0)
         ring_chunk = usp_chunk_size * sp_ulysses_size
         ring_start = ring_rank * ring_chunk
-        new_data["position_ids"] = torch.arange(
-            ring_start, ring_start + ring_chunk, dtype=torch.long
-        ).unsqueeze(0)
+        if "position_ids" in data and data["position_ids"] is not None:
+            position_ids = data["position_ids"]
+            if not isinstance(position_ids, torch.Tensor):
+                position_ids = torch.as_tensor(position_ids)
+            position_ids = position_ids.long()
+            position_ids, _ = _slice_and_pad_position_ids(position_ids)
+            local_position_len = position_ids.shape[-1]
+            if local_position_len > usp_chunk_size:
+                position_ids = position_ids[..., :usp_chunk_size]
+            if position_ids.shape[-1] < usp_chunk_size:
+                position_ids = F.pad(
+                    position_ids, (0, usp_chunk_size - position_ids.shape[-1])
+                )
+            new_data["position_ids"] = position_ids.contiguous()
+        else:
+            new_data["position_ids"] = torch.arange(
+                ring_start, ring_start + ring_chunk, dtype=torch.long
+            ).unsqueeze(0)
 
         if transform:
             new_data = transform(new_data)

@@ -218,11 +218,20 @@ def run_test_case(rank, world_size, port):
             try:
                 if rank == 0:
                     os.makedirs(tmp_dir, exist_ok=True)
+                    sample_mrope_position_ids = torch.stack(
+                        [
+                            torch.arange(seq_len),
+                            torch.arange(seq_len) + 10_000,
+                            torch.arange(seq_len) + 20_000,
+                        ],
+                        dim=0,
+                    )
                     sample = {
                         "input_ids": data_input_ids[0].cpu(),
                         "loss_mask": torch.ones_like(data_input_ids[0].cpu()),
                         "hidden_state": data_hidden_states[0].cpu().unsqueeze(0),
                         "aux_hidden_state": data_hidden_states[0].cpu().unsqueeze(0),
+                        "position_ids": sample_mrope_position_ids,
                     }
                     torch.save(sample, os.path.join(tmp_dir, "data_0.ckpt"))
                     dbg(rank, "wrote sample ckpt")
@@ -274,6 +283,15 @@ def run_test_case(rank, world_size, port):
                 )
                 assert state.input_ids.shape[1] == local_seq_len - ttt_length
                 assert state.hidden_states.shape[1] == local_seq_len - ttt_length
+                assert state.position_ids is not None
+                expected_position_len = (
+                    local_seq_len - ttt_length
+                ) * sp_ulysses_degree
+                assert state.position_ids.shape == (3, 1, expected_position_len)
+                assert torch.equal(
+                    torch.diff(state.position_ids[0, 0].cpu()),
+                    torch.ones(expected_position_len - 1, dtype=torch.long),
+                )
                 dbg(rank, "adapter step_view ok")
             finally:
                 if rank == 0:
