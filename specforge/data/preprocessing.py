@@ -654,6 +654,20 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
         new_data["target"] = target
         new_data["hidden_state"] = hidden_state
         new_data["input_ids"] = input_ids
+        if "position_ids" in data and data["position_ids"] is not None:
+            position_ids = data["position_ids"]
+            if not isinstance(position_ids, torch.Tensor):
+                position_ids = torch.as_tensor(position_ids)
+            if position_ids.ndim == 1:
+                position_ids = position_ids.unsqueeze(0)
+            if position_ids.ndim == 2 and position_ids.shape[0] == 3:
+                position_ids = position_ids.unsqueeze(1)
+            if position_ids.ndim not in (2, 3):
+                raise ValueError(
+                    "Unsupported position_ids shape for offline preprocessing: "
+                    f"{tuple(position_ids.shape)}"
+                )
+            new_data["position_ids"] = position_ids[..., :max_len].long().contiguous()
         if transform:
             new_data = transform(new_data)
         return new_data

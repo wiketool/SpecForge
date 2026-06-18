@@ -226,7 +226,21 @@ class OnlineEagle3Model(Eagle3Model):
                 .view(-1, seq_length)
             )
 
-        position_ids = position_ids.long()
+        position_ids = position_ids.to(device=device, dtype=torch.long)
+        if position_ids.dim() == 2 and position_ids.shape[0] == 3:
+            position_ids = position_ids.unsqueeze(1)
+        if position_ids.dim() == 3:
+            if position_ids.shape[0] != 3:
+                raise ValueError(
+                    "MRoPE position_ids must have shape [3, batch, seq], "
+                    f"got {tuple(position_ids.shape)}."
+                )
+            if position_ids.shape[-1] != seq_length:
+                raise ValueError(
+                    "MRoPE position_ids seq dimension must match hidden_states: "
+                    f"position_ids={tuple(position_ids.shape)}, seq_length={seq_length}."
+                )
+            return position_ids.contiguous()
         return position_ids.view(-1, seq_length)
 
     def forward(

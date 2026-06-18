@@ -1,5 +1,6 @@
 import torch
 
+from specforge.core.eagle3 import OnlineEagle3Model
 from specforge.data.preprocessing import OfflineEagle3Dataset
 
 
@@ -36,6 +37,46 @@ def test_process_data_usp_slices_mrope_position_ids_seq_last():
     assert torch.equal(item["position_ids"][0, 0], torch.arange(4, 8))
     assert torch.equal(item["position_ids"][1, 0], torch.arange(104, 108))
     assert torch.equal(item["position_ids"][2, 0], torch.arange(204, 208))
+
+
+def test_process_data_keeps_mrope_position_ids_for_non_usp_baseline():
+    item = OfflineEagle3Dataset.process_data(_sample(seq_len=12), max_len=8)
+
+    assert item["position_ids"].shape == (3, 1, 8)
+    assert torch.equal(item["position_ids"][0, 0], torch.arange(8))
+    assert torch.equal(item["position_ids"][1, 0], torch.arange(100, 108))
+    assert torch.equal(item["position_ids"][2, 0], torch.arange(200, 208))
+
+
+def test_prepare_position_ids_preserves_mrope_shape_for_non_usp_baseline():
+    model = OnlineEagle3Model(draft_model=None, attention_backend="fa")
+    position_ids = torch.arange(18).view(3, 1, 6)
+
+    prepared = model._prepare_position_ids(
+        position_ids=position_ids,
+        seq_length=6,
+        past_key_values_length=0,
+        device=torch.device("cpu"),
+        is_vlm=True,
+        input_ids=torch.zeros(1, 6, dtype=torch.long),
+        image_grid_thw=None,
+    )
+
+    assert prepared.shape == (3, 1, 6)
+    assert torch.equal(prepared, position_ids)
+
+    prepared_from_2d = model._prepare_position_ids(
+        position_ids=position_ids[:, 0],
+        seq_length=6,
+        past_key_values_length=0,
+        device=torch.device("cpu"),
+        is_vlm=True,
+        input_ids=torch.zeros(1, 6, dtype=torch.long),
+        image_grid_thw=None,
+    )
+
+    assert prepared_from_2d.shape == (3, 1, 6)
+    assert torch.equal(prepared_from_2d, position_ids)
 
 
 def test_process_data_usp_keeps_linear_fallback_expanded_for_ulysses():

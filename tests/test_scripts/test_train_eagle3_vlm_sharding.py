@@ -15,6 +15,9 @@ TARGET_MODEL_PATH = (
     / "eagle3_target_model.py"
 )
 TRAIN_SCRIPT_PATH = Path(__file__).parents[2] / "scripts" / "train_eagle3.py"
+PREPARE_HIDDEN_SCRIPT_PATH = (
+    Path(__file__).parents[2] / "scripts" / "prepare_hidden_states.py"
+)
 SPEC = importlib.util.spec_from_file_location("vlm_sharding", MODULE_PATH)
 vlm_sharding = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(vlm_sharding)
@@ -136,6 +139,46 @@ class TestTrainEagle3VlmSharding(unittest.TestCase):
         self.assertIn("if args.is_vlm:", source)
         self.assertIn("AutoProcessor.from_pretrained", source)
         self.assertIn("return target_head, processor", source)
+
+    def test_prepare_hidden_states_vlm_processor_uses_pixel_bounds(self):
+        tree = ast.parse(PREPARE_HIDDEN_SCRIPT_PATH.read_text())
+        source = PREPARE_HIDDEN_SCRIPT_PATH.read_text()
+
+        self.assertIn('"--min-pixels"', source)
+        self.assertIn('"--max-pixels"', source)
+
+        build_target_model = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "build_target_model"
+        )
+        calls = [
+            node
+            for node in ast.walk(build_target_model)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "from_pretrained"
+        ]
+        processor_calls = [
+            call
+            for call in calls
+            if isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "AutoProcessor"
+        ]
+        self.assertEqual(len(processor_calls), 1)
+        kwargs = {kw.arg: kw.value for kw in processor_calls[0].keywords}
+        self.assertEqual(kwargs["min_pixels"].attr, "min_pixels")
+        self.assertEqual(kwargs["max_pixels"].attr, "max_pixels")
+
+    def test_prepare_hidden_states_vlm_generator_uses_explicit_features(self):
+        source = PREPARE_HIDDEN_SCRIPT_PATH.read_text()
+
+        self.assertIn("from datasets import Dataset, Features, Value", source)
+        self.assertIn("generator_features", source)
+        self.assertIn('"image": Value("string")', source)
+        self.assertIn('"tools": Value("string")', source)
+        self.assertIn('dataset_generator_kwargs["features"] = generator_features', source)
+        self.assertIn("Dataset.from_generator(**dataset_generator_kwargs)", source)
 
 
 if __name__ == "__main__":

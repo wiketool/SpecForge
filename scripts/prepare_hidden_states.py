@@ -47,7 +47,7 @@ import torch.distributed as dist
 from tqdm import tqdm
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer
 
-from datasets import Dataset
+from datasets import Dataset, Features, Value
 from specforge.args import SGLangBackendArgs
 from specforge.data import build_eagle3_dataset, prepare_dp_dataloaders
 from specforge.distributed import (
@@ -103,6 +103,8 @@ def parse_args():
     )
     data_group.add_argument("--num-samples", type=int, default=None)
     data_group.add_argument("--build-dataset-num-proc", type=int, default=8)
+    data_group.add_argument("--min-pixels", type=int, default=50176)
+    data_group.add_argument("--max-pixels", type=int, default=802816)
 
     inference_group = parser.add_argument_group("inference")
     inference_group.add_argument("--tp-size", type=int, default=1)
@@ -189,7 +191,11 @@ def build_target_model(
     target_model.set_aux_hidden_states_layers(args.aux_hidden_states_layers)
 
     if args.is_vlm:
-        processor = AutoProcessor.from_pretrained(args.target_model_path)
+        processor = AutoProcessor.from_pretrained(
+            args.target_model_path,
+            min_pixels=args.min_pixels,
+            max_pixels=args.max_pixels,
+        )
     else:
         processor = None
 
@@ -694,18 +700,38 @@ def main():
         args.data_path
     ), f"Dataset path {args.data_path} does not exist"
 
+    generator_features = (
+        Features(
+            {
+                "conversations": [
+                    {"role": Value("string"), "content": Value("string")}
+                ],
+                "image": Value("string"),
+                "tools": Value("string"),
+            }
+        )
+        if args.is_vlm
+        else None
+    )
+    dataset_generator_kwargs = {
+        "generator": safe_conversations_generator,
+        "gen_kwargs": {
+            "file_path": args.data_path,
+            "require_assistant_response": not args.is_preformatted,
+        },
+        "cache_dir": os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "cache",
+            "hf_dataset",
+        ),
+        "num_proc": min(args.build_dataset_num_proc, 32),
+    }
+    if generator_features is not None:
+        dataset_generator_kwargs["features"] = generator_features
+
     with rank_0_priority():
         print_with_rank("Loading/building dataset cache...")
-        dataset = Dataset.from_generator(
-            generator=safe_conversations_generator,
-            gen_kwargs={"file_path": args.data_path},
-            cache_dir=os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "cache",
-                "hf_dataset",
-            ),
-            num_proc=min(args.build_dataset_num_proc, 32),
-        )
+        dataset = Dataset.from_generator(**dataset_generator_kwargs)
     if args.num_samples is not None:
         dataset = dataset.select(range(args.num_samples))
     # Tokenizer and cache key
