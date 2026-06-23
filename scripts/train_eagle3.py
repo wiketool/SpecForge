@@ -35,6 +35,7 @@ from specforge.distributed import (
     destroy_distributed,
     get_dp_group,
     get_draft_dp_group,
+    get_draft_sp_group,
     get_tp_group,
     init_distributed,
 )
@@ -170,6 +171,12 @@ def parse_args() -> Tuple[ArgumentParser, Namespace]:
     dataset_group = parser.add_argument_group("dataset")
     dataset_group.add_argument("--train-data-path", type=str, required=True)
     dataset_group.add_argument("--train-hidden-states-path", type=str, default=None)
+    dataset_group.add_argument(
+        "--vocab-mapping-path",
+        type=str,
+        default=None,
+        help="Optional existing vocab_mapping.pt to load instead of rebuilding from the training data.",
+    )
     dataset_group.add_argument("--eval-hidden-states-path", type=str, default=None)
     dataset_group.add_argument("--eval-data-path", type=str, default=None)
     dataset_group.add_argument("--chat-template", type=str, default="llama3")
@@ -600,13 +607,17 @@ def build_dataloaders(
             num_proc=args.build_dataset_num_proc,
             train_only_last_turn=args.train_only_last_turn,
         )
-        vocab_mapping_path = generate_vocab_mapping_file(
-            dataset=train_eagle3_dataset,
-            target_vocab_size=draft_model_config.vocab_size,
-            draft_vocab_size=draft_model_config.draft_vocab_size,
-            cache_dir=os.path.join(args.cache_dir, "vocab_mapping"),
-            cache_key=cache_key,
-        )
+        if args.vocab_mapping_path is not None:
+            vocab_mapping_path = args.vocab_mapping_path
+            print(f"Using provided vocab mapping: {vocab_mapping_path}")
+        else:
+            vocab_mapping_path = generate_vocab_mapping_file(
+                dataset=train_eagle3_dataset,
+                target_vocab_size=draft_model_config.vocab_size,
+                draft_vocab_size=draft_model_config.draft_vocab_size,
+                cache_dir=os.path.join(args.cache_dir, "vocab_mapping"),
+                cache_key=cache_key,
+            )
 
         if not is_online:
             train_eagle3_dataset = build_offline_eagle3_dataset(
@@ -1116,6 +1127,39 @@ def main():
                 kl_scale=args.kl_scale,
                 kl_decay=args.kl_decay,
             )
+    fsdp_sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
+    fsdp_process_group = dist.group.WORLD
+    if args.attention_backend == "usp" and not is_online:
+        draft_sp_group = get_draft_sp_group()
+        draft_dp_group = get_draft_dp_group()
+        draft_sp_world_size = dist.get_world_size(draft_sp_group)
+        draft_dp_world_size = dist.get_world_size(draft_dp_group)
+        if draft_dp_world_size > 1:
+            fsdp_sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
+            fsdp_process_group = (draft_sp_group, draft_dp_group)
+            if dist.get_rank() == 0:
+                print(
+                    "Using FSDP _HYBRID_SHARD_ZERO2 with "
+                    f"shard_world_size={draft_sp_world_size}, "
+                    f"replica_world_size={draft_dp_world_size}",
+                    flush=True,
+                )
+        else:
+            fsdp_process_group = draft_sp_group
+            if dist.get_rank() == 0:
+                print(
+                    "Using FSDP SHARD_GRAD_OP with "
+                    f"draft_sp_world_size={draft_sp_world_size}",
+                    flush=True,
+                )
+    else:
+        if dist.get_rank() == 0:
+            print(
+                "Using FSDP SHARD_GRAD_OP with WORLD group "
+                f"world_size={dist.get_world_size()}",
+                flush=True,
+            )
+
     eagle3_model = FSDP(
         eagle3_model,
         use_orig_params=True,
@@ -1123,8 +1167,8 @@ def main():
             param_dtype=torch.bfloat16,
             buffer_dtype=torch.bfloat16,
         ),
-        sharding_strategy=ShardingStrategy.SHARD_GRAD_OP,
-        process_group=dist.group.WORLD,  # the draft model should run dp for all processes
+        sharding_strategy=fsdp_sharding_strategy,
+        process_group=fsdp_process_group,
     )
     print_with_rank("Initialized Eagle3 FSDP model")
 
