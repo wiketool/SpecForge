@@ -1,4 +1,5 @@
 import argparse
+import ctypes.util
 import hashlib
 import math
 import os
@@ -59,6 +60,76 @@ from specforge.vlm_sharding import (
     get_tp_data_shard,
     get_tp_image_grid_thw_shard,
 )
+
+
+def _format_nccl_version(version) -> str:
+    if isinstance(version, (tuple, list)):
+        return ".".join(str(part) for part in version)
+    return str(version)
+
+
+def _format_nccl_paths(paths: List[str]) -> str:
+    return ",".join(paths) if paths else "not found"
+
+
+def _dedupe_preserve_order(paths: List[str]) -> List[str]:
+    seen = set()
+    deduped = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+    return deduped
+
+
+def _get_ld_preload_nccl_paths() -> List[str]:
+    ld_preload = os.getenv("LD_PRELOAD", "")
+    paths = []
+    for entry in ld_preload.replace(":", " ").split():
+        if "libnccl" in os.path.basename(entry):
+            paths.append(entry)
+    return _dedupe_preserve_order(paths)
+
+
+def _get_loaded_nccl_paths() -> List[str]:
+    maps_path = "/proc/self/maps"
+    paths = []
+    try:
+        with open(maps_path, "r", encoding="utf-8") as maps_file:
+            for line in maps_file:
+                if "libnccl" not in line:
+                    continue
+                path = line.rsplit(maxsplit=1)[-1]
+                if path.startswith("/") and "libnccl" in os.path.basename(path):
+                    paths.append(os.path.realpath(path))
+    except OSError as exc:
+        return [f"unavailable({type(exc).__name__}: {exc})"]
+    return _dedupe_preserve_order(paths)
+
+
+def print_nccl_startup_info() -> None:
+    try:
+        nccl_version = _format_nccl_version(torch.cuda.nccl.version())
+    except Exception as exc:
+        nccl_version = f"unavailable({type(exc).__name__}: {exc})"
+
+    loaded_paths = _get_loaded_nccl_paths()
+    ld_preload_paths = _get_ld_preload_nccl_paths()
+    ctypes_path = ctypes.util.find_library("nccl") or "not found"
+
+    print(
+        "[nccl-info] startup "
+        f"rank={os.getenv('RANK', 'NA')} "
+        f"local_rank={os.getenv('LOCAL_RANK', 'NA')} "
+        f"node_rank={os.getenv('GROUP_RANK', os.getenv('NODE_RANK', 'NA'))} "
+        f"world_size={os.getenv('WORLD_SIZE', 'NA')} "
+        f"torch_cuda_nccl_version={nccl_version} "
+        f"loaded_libnccl_paths={_format_nccl_paths(loaded_paths)} "
+        f"ld_preload_libnccl_paths={_format_nccl_paths(ld_preload_paths)} "
+        f"ctypes_find_library_nccl={ctypes_path}",
+        flush=True,
+    )
 
 
 def print_cuda_memory_debug(label: str) -> None:
@@ -1035,6 +1106,7 @@ def main():
     # 1. Initialize
     # ================================================
     parser, args = parse_args()
+    print_nccl_startup_info()
     set_seed(args.seed)
     init_distributed(
         timeout=args.dist_timeout,
