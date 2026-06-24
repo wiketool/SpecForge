@@ -5,6 +5,7 @@ export http_proxy="${http_proxy:-http://oversea-squid1.jp.txyun:11080}"
 export https_proxy="${https_proxy:-http://oversea-squid1.jp.txyun:11080}"
 export no_proxy="${no_proxy:-localhost,127.0.0.1,localaddress,localdomain.com,internal,corp.kuaishou.com,test.gifshow.com,staging.kuaishou.com}"
 
+export LD_PRELOAD=/nlp_group/chenjiapeng/spec_test/libnccl.so.2.27.7.ubuntu-cuda128.fix7
 SPECFORGE_DIR="${SPECFORGE_DIR:-/mmu_mllm_hdd_3/renjunchi/SpecForge-private}"
 KSYNC_DIR="${KSYNC_DIR:-/mmu_mllm_hdd_3/renjunchi/ksync-dev}"
 DATASETS_DIR="${DATASETS_DIR:-/mmu_mllm_hdd_3/renjunchi/datasets}"
@@ -46,6 +47,11 @@ LOG_INTERVAL="${LOG_INTERVAL:-1}"
 TTT_LENGTH="${TTT_LENGTH:-7}"
 DRAFT_ACCUMULATION_STEPS="${DRAFT_ACCUMULATION_STEPS:-1}"
 REPORT_TO="${REPORT_TO:-none}"
+PROFILE="${PROFILE:-0}"
+PROFILE_START_STEP="${PROFILE_START_STEP:-1}"
+PROFILE_NUM_STEPS="${PROFILE_NUM_STEPS:-2}"
+MAX_NUM_STEPS="${MAX_NUM_STEPS:-}"
+VOCAB_MAPPING_PATH="${VOCAB_MAPPING_PATH:-/mmu_mllm_hdd_3/renjunchi/SpecForge-private/outputs/full_vocab_mapping.pt}"
 
 . "$KSYNC_DIR/scripts/lib/load_hf_env.sh"
 
@@ -81,9 +87,6 @@ if [ "${RESUME:-0}" = "1" ]; then
 fi
 if [ -n "${CKPT_DIR:-}" ]; then
   EXTRA_ARGS+=(--ckpt-dir "$CKPT_DIR")
-fi
-if [ -n "${TRAINING_STATE_PATH:-}" ]; then
-  EXTRA_ARGS+=(--training-state-path "$TRAINING_STATE_PATH")
 fi
 
 cd "$SPECFORGE_DIR"
