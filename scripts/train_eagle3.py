@@ -1331,16 +1331,27 @@ def main():
                         ],
                         with_stack=True,
                         record_shapes=args.profile_record_shapes,
+                        profile_memory=True,
                     )
+                    if torch.distributed.get_rank() == 0:
+                        torch.cuda.memory._record_memory_history(max_entries=100_000)
                     torch_profiler.start()
                 if global_step == args.profile_start_step + args.profile_num_steps + 1:
                     output_path = os.path.join(
                         args.output_dir,
-                        f"profile_rank{torch.distributed.get_rank()}_{time.time()}.trace.json.gz",
+                        f"profile_rank{torch.distributed.get_rank()}_{time.time()}.pt.trace.json.gz",
                     )
                     print(f"End profile {output_path=}")
                     torch_profiler.stop()
                     torch_profiler.export_chrome_trace(output_path)
+                    mem_path = output_path.replace(".trace.json.gz", ".mem.html")
+                    torch_profiler.export_memory_timeline(
+                        mem_path, device=f"cuda:{torch.cuda.current_device()}"
+                    )
+                    if torch.distributed.get_rank() == 0:
+                        torch.cuda.memory._dump_snapshot(
+                            os.path.join(args.output_dir, "mem_snapshot.pickle"))
+                        torch.cuda.memory._record_memory_history(enabled=None)
 
             # ================================================
             # 7.1 Training Step
