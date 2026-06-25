@@ -287,7 +287,7 @@ class OnlineEagle3Model(Eagle3Model):
             length=self.length,
         )
         del target
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         # basic info
         batch_size, seq_length, _ = hidden_states.shape
