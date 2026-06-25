@@ -1256,6 +1256,9 @@ def main():
     )
     print_with_rank("Initialized optimizer and scheduler")
 
+    nccl_version = torch.cuda.nccl.version()
+    print(f"Use NCCL version: {nccl_version}")
+
     # Restore optimizer/scheduler state for true resume
     if resume_state is not None:
         optimizer.load_state_dict(resume_state)
