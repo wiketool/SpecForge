@@ -23,6 +23,7 @@
 import gzip
 import io
 import json
+import logging
 import os
 import re
 import warnings
@@ -53,11 +54,22 @@ from .template import TEMPLATE_REGISTRY, ChatTemplate
 # define a type called conversation
 Conversation = List[Dict[str, str]]
 IMAGE_COLUMNS = ("image", "images", "image_path", "image_file", "image_url")
+logger = logging.getLogger(__name__)
 
 
 # ==============================
 # This file is for preprocessing the data
 # ==============================
+
+
+def _shape(tensor) -> Optional[Tuple[int, ...]]:
+    return None if tensor is None else tuple(tensor.shape)
+
+
+def _rank() -> int:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
 
 
 def _has_assistant_response(example: Dict) -> bool:
@@ -682,6 +694,8 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
         sp_size=1,
         ring_rank=0,
         sp_ring_size=1,
+        sample_id=None,
+        sample_path=None,
     ):
         """
         USP preprocess: shard all sequences by sp_rank and add TTT overlap.
@@ -776,8 +790,50 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
                 ring_start, ring_start + ring_chunk, dtype=torch.long
             ).unsqueeze(0)
 
+        new_data["data_id"] = sample_id
+        new_data["data_path"] = sample_path
+
         if transform:
             new_data = transform(new_data)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "OfflineEagle3Dataset.usp_split: "
+                "rank=%s, data_id=%s, sample_path=%s, original_len=%s, max_len=%s, "
+                "global_len=%s, chunk_size=%s, start=%s, end=%s, "
+                "local_len=%s, valid_len=%s, ttt_length=%s, usp_chunk_size=%s, "
+                "sp_rank=%s/%s, ring_rank=%s/%s, sp_ulysses_size=%s, "
+                "ring_chunk=%s, input_ids_shape=%s, attention_mask_shape=%s, "
+                "loss_mask_shape=%s, hidden_state_shape=%s, target_shape=%s, "
+                "position_ids_shape=%s, loss_mask_sum=%s, attention_mask_sum=%s",
+                _rank(),
+                sample_id,
+                sample_path,
+                input_ids.shape[1],
+                max_len,
+                global_len,
+                chunk_size,
+                start,
+                end,
+                local_len,
+                valid_len,
+                ttt_length,
+                usp_chunk_size,
+                sp_rank,
+                sp_size,
+                ring_rank,
+                sp_ring_size,
+                sp_ulysses_size,
+                ring_chunk,
+                _shape(new_data.get("input_ids")),
+                _shape(new_data.get("attention_mask")),
+                _shape(new_data.get("loss_mask")),
+                _shape(new_data.get("hidden_state")),
+                _shape(new_data.get("target")),
+                _shape(new_data.get("position_ids")),
+                new_data["loss_mask"].sum().item(),
+                new_data["attention_mask"].sum().item(),
+            )
 
         return new_data
 
@@ -805,6 +861,8 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
 
         # 2. Read only specific bytes from disk
         if self.use_usp_preprocess:
+            data_path = self.datapaths[index]
+            sample_id = f"{index}:{os.path.basename(data_path)}"
             return self.process_data_usp(
                 data,
                 self.max_len,
@@ -814,6 +872,8 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
                 sp_size=self.sp_size,
                 ring_rank=self.ring_rank,
                 sp_ring_size=self.sp_ring_size,
+                sample_id=sample_id,
+                sample_path=data_path,
             )
         return self.process_data(
             data,

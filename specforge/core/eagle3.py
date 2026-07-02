@@ -20,6 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from typing import Callable, List, Optional, Tuple
 
 import torch
@@ -32,6 +33,27 @@ from specforge.core.lk_loss import compute_acceptance_rate, compute_lk_loss
 from specforge.core.loss import LogSoftmaxLoss
 from specforge.modeling.draft import Eagle3DraftModel
 from specforge.utils import padding
+
+
+logger = logging.getLogger(__name__)
+
+
+def _shape(tensor: Optional[torch.Tensor]) -> Optional[Tuple[int, ...]]:
+    return None if tensor is None else tuple(tensor.shape)
+
+
+def _rank() -> int:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
+
+
+def _format_data_id(data_id) -> Optional[str]:
+    if data_id is None:
+        return None
+    if isinstance(data_id, (list, tuple)):
+        return ",".join(str(item) for item in data_id)
+    return str(data_id)
 
 
 class Eagle3Model(nn.Module):
@@ -274,6 +296,7 @@ class OnlineEagle3Model(Eagle3Model):
             past_key_values: We dont use this past_key_values in eagle3, but keep it for compatibility. We control kvcache by cache_hidden.
             position_ids: (batch, seq_len)
         """
+        data_id = _format_data_id(kwargs.get("data_id"))
         # Step 1: handle vocab size
         (
             target_p_padded,
@@ -384,6 +407,29 @@ class OnlineEagle3Model(Eagle3Model):
 
             # Step 5.4: get logits
             logits = self.draft_model.compute_logits(hidden_states)
+            if (
+                self.attention_backend == "usp"
+                and idx == 0
+                and logger.isEnabledFor(logging.DEBUG)
+            ):
+                logger.debug(
+                    "OnlineEagle3Model.usp_train_batch: "
+                    "rank=%s, data_id=%s, seq_length=%s, ttt_length=%s, "
+                    "usp_chunk_size=%s, logits_shape=%s, target_p_shape=%s, "
+                    "position_mask_shape=%s, loss_mask_shape=%s, "
+                    "position_mask_sum=%s, loss_mask_sum=%s",
+                    _rank(),
+                    data_id,
+                    seq_length,
+                    self.length,
+                    state.input_ids.shape[1],
+                    _shape(logits),
+                    _shape(state.target_p),
+                    _shape(state.position_mask),
+                    _shape(state.loss_mask),
+                    state.position_mask.sum().item(),
+                    state.loss_mask.sum().item(),
+                )
 
             # Step 5.5 + 5.6: metric and loss
             (

@@ -1,3 +1,4 @@
+import logging
 import argparse
 import ctypes.util
 import hashlib
@@ -359,6 +360,11 @@ def parse_args() -> Tuple[ArgumentParser, Namespace]:
     other_group.add_argument("--cache-dir", type=str, default="./cache")
     other_group.add_argument("--output-dir", type=str, required=True)
     other_group.add_argument("--verbose", action="store_true")
+    other_group.add_argument(
+        "--debug-logger",
+        action="store_true",
+        help="Set the global Python logging level to DEBUG.",
+    )
     other_group.add_argument(
         "--dist-timeout",
         type=int,
@@ -919,6 +925,7 @@ def run_forward(
             ),
             image_grid_thw=image_grid_thw,
             is_vlm=args.is_vlm,
+            data_id=data.get("data_id"),
         )
     return (
         plosses,
@@ -1106,6 +1113,14 @@ def main():
     # 1. Initialize
     # ================================================
     parser, args = parse_args()
+    log_level = logging.DEBUG if args.debug_logger else logging.INFO
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=log_level,
+    )
+    logging.getLogger().setLevel(log_level)
+
     print_nccl_startup_info()
     set_seed(args.seed)
     init_distributed(

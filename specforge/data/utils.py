@@ -134,6 +134,10 @@ class DataCollatorWithPadding:
             "hidden_state": None,
             "target": None,
         }
+        if "data_id" in features[0]:
+            batch["data_id"] = [item.get("data_id") for item in features]
+        if "data_path" in features[0]:
+            batch["data_path"] = [item.get("data_path") for item in features]
         if batch_position_ids is not None:
             batch["position_ids"] = batch_position_ids
         if all("hidden_state" in item for item in features):
@@ -278,6 +282,10 @@ class VlmDataCollatorWithPadding:
             "hidden_state": None,
             "target": None,
         }
+        if "data_id" in features[0]:
+            batch["data_id"] = [item.get("data_id") for item in features]
+        if "data_path" in features[0]:
+            batch["data_path"] = [item.get("data_path") for item in features]
         if batch_position_ids is not None:
             batch["position_ids"] = batch_position_ids
         if all("hidden_state" in item for item in features):
