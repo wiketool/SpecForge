@@ -194,6 +194,8 @@ class LogSoftmaxLoss(torch.autograd.Function):
             num_warps=num_warps,
         )
         ctx.save_for_backward(logits.detach(), target, position_mask, m, d)
+        # TODO：position_mask 只控制哪些 token 位置产生非零 loss，
+        # 但这里的 mean 是对所有 B*T 行求平均。对于长上下文场景会极大稀释loss。
         return loss.squeeze(1).mean()
 
     @staticmethod
