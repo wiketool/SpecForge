@@ -147,20 +147,24 @@ class UspAdapter(BackendAdapter):
         target_p = target_p_padded[:, idx : idx + usp_chunk_size, :]
         target_p_on_draft = target_p_on_draft_padded[:, idx : idx + usp_chunk_size, :]
         target_token_ids = target_token_ids_padded[:, idx : idx + usp_chunk_size]
-        expanded_position_len = usp_chunk_size * self.sp_ulysses_degree
         if position_ids is None:
-            step_position_ids = None
-        elif position_ids.shape[-1] >= expanded_position_len:
-            step_position_ids = position_ids[..., :expanded_position_len].contiguous()
+            raise ValueError(
+                "USP attention requires position_ids. Offline USP samples must "
+                "provide local chunk position_ids; UspAdapter gathers them across "
+                "the Ulysses group."
+            )
         elif position_ids.shape[-1] == usp_chunk_size:
             step_position_ids = self._all_gather_seq_last(
                 position_ids[..., :usp_chunk_size], self.ulysses_pg
             )
         else:
+            expanded_position_len = usp_chunk_size * self.sp_ulysses_degree
             raise ValueError(
-                "USP position_ids must either already match the Ulysses-expanded "
-                f"sequence length ({expanded_position_len}) or the local chunk "
-                f"length ({usp_chunk_size}); got shape {tuple(position_ids.shape)}."
+                "USP position_ids must match the local chunk length before "
+                "Ulysses all-gather. "
+                f"Expected local length {usp_chunk_size}; the gathered attention "
+                f"length will be {expanded_position_len}. "
+                f"Got shape {tuple(position_ids.shape)}."
             )
         return StepState(
             input_ids=global_input_ids[:, :usp_chunk_size],

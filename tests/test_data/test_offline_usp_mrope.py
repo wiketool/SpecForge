@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from specforge.core.eagle3 import OnlineEagle3Model
 from specforge.data.preprocessing import OfflineEagle3Dataset
@@ -79,7 +80,7 @@ def test_prepare_position_ids_preserves_mrope_shape_for_non_usp_baseline():
     assert torch.equal(prepared_from_2d, position_ids)
 
 
-def test_process_data_usp_keeps_linear_fallback_expanded_for_ulysses():
+def test_process_data_usp_keeps_local_linear_fallback_when_position_ids_optional():
     data = _sample(seq_len=12)
     data.pop("position_ids")
 
@@ -94,5 +95,24 @@ def test_process_data_usp_keeps_linear_fallback_expanded_for_ulysses():
     )
 
     assert item["input_ids"].shape == (1, 4)
-    assert item["position_ids"].shape == (1, 6)
-    assert torch.equal(item["position_ids"][0], torch.arange(6))
+    assert item["position_ids"].shape == (1, 3)
+    assert torch.equal(item["position_ids"][0], torch.arange(3))
+
+
+def test_process_data_usp_requires_position_ids_when_requested():
+    data = _sample(seq_len=12)
+    data.pop("position_ids")
+
+    with pytest.raises(KeyError, match="position_ids are required"):
+        OfflineEagle3Dataset.process_data_usp(
+            data,
+            max_len=12,
+            ttt_length=1,
+            sp_rank=0,
+            sp_size=4,
+            ring_rank=0,
+            sp_ring_size=2,
+            sample_id="0:data_0.ckpt",
+            sample_path="/tmp/data_0.ckpt",
+            require_position_ids=True,
+        )

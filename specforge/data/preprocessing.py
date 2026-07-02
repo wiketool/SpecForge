@@ -627,6 +627,7 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
         max_len=2048,
         ttt_length=1,
         use_usp_preprocess=False,
+        require_position_ids=False,
     ):
         """
         Args:
@@ -635,6 +636,7 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
             max_len: Maximum sequence length to load.
             ttt_length: TTT overlap length used in USP preprocessing.
             use_usp_preprocess: Whether to shard all sequences with USP overlap in preprocessing.
+            require_position_ids: Whether each offline sample must provide position_ids.
         """
         self.datapaths = datapath
         self.transform = transform
@@ -642,6 +644,7 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
         self.max_len = max_len
         self.ttt_length = ttt_length
         self.use_usp_preprocess = use_usp_preprocess
+        self.require_position_ids = require_position_ids
         if use_usp_preprocess:
             sp_group = get_draft_sp_group()
             self.sp_rank = torch.distributed.get_rank(sp_group)
@@ -696,6 +699,7 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
         sp_ring_size=1,
         sample_id=None,
         sample_path=None,
+        require_position_ids=False,
     ):
         """
         USP preprocess: shard all sequences by sp_rank and add TTT overlap.
@@ -770,7 +774,6 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
         sp_ulysses_size = max(1, sp_size // sp_ring_size)
         usp_chunk_size = max(local_len - ttt_length, 0)
         ring_chunk = usp_chunk_size * sp_ulysses_size
-        ring_start = ring_rank * ring_chunk
         if "position_ids" in data and data["position_ids"] is not None:
             position_ids = data["position_ids"]
             if not isinstance(position_ids, torch.Tensor):
@@ -786,8 +789,16 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
                 )
             new_data["position_ids"] = position_ids.contiguous()
         else:
+            if require_position_ids:
+                where = f" sample_id={sample_id}" if sample_id is not None else ""
+                path = f" sample_path={sample_path}" if sample_path is not None else ""
+                raise KeyError(
+                    "position_ids are required for USP MRoPE offline preprocessing "
+                    f"but are missing.{where}{path} Regenerate hidden states with "
+                    "VLM/MRoPE position_ids."
+                )
             new_data["position_ids"] = torch.arange(
-                ring_start, ring_start + ring_chunk, dtype=torch.long
+                start, start + usp_chunk_size, dtype=torch.long
             ).unsqueeze(0)
 
         new_data["data_id"] = sample_id
@@ -874,6 +885,7 @@ class OfflineEagle3Dataset(torch.utils.data.Dataset):
                 sp_ring_size=self.sp_ring_size,
                 sample_id=sample_id,
                 sample_path=data_path,
+                require_position_ids=self.require_position_ids,
             )
         return self.process_data(
             data,
@@ -890,6 +902,7 @@ def build_offline_eagle3_dataset(
     max_len: int = 2048,
     ttt_length: int = 1,
     use_usp_preprocess: bool = False,
+    require_position_ids: bool = False,
 ) -> torch.utils.data.Dataset:
 
     return OfflineEagle3Dataset(
@@ -897,6 +910,7 @@ def build_offline_eagle3_dataset(
         max_len=max_len,
         ttt_length=ttt_length,
         use_usp_preprocess=use_usp_preprocess,
+        require_position_ids=require_position_ids,
     )
 
 

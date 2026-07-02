@@ -719,6 +719,11 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
                 attention_mask=attention_mask_.cpu(),
                 tokens_per_second=self.tokens_per_second,
             )
+            if mrope_positions is None:
+                raise ValueError(
+                    "VLM Eagle3 hidden-state generation requires MRoPE "
+                    "position_ids, but MRotaryEmbedding.get_rope_index returned None."
+                )
 
             mm_inputs = None
             input_id_list = input_id_.view(-1).tolist()

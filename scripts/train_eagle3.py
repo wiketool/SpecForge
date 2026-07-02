@@ -626,6 +626,23 @@ def build_draft_model(args: Namespace) -> Tuple[AutoDraftModelConfig, nn.Module]
     return draft_model_config, draft_model, ckpt_info, resume_state
 
 
+def _rope_scaling_type(draft_model_config: AutoDraftModelConfig) -> Optional[str]:
+    rope_scaling = getattr(draft_model_config, "rope_scaling", None)
+    if rope_scaling is None:
+        return None
+    if isinstance(rope_scaling, dict):
+        return rope_scaling.get("rope_type", rope_scaling.get("type"))
+    return getattr(rope_scaling, "rope_type", getattr(rope_scaling, "type", None))
+
+
+def _requires_offline_position_ids(
+    args: Namespace, draft_model_config: AutoDraftModelConfig
+) -> bool:
+    return args.attention_backend == "usp" and _rope_scaling_type(
+        draft_model_config
+    ) == "mrope"
+
+
 def build_dataloaders(
     args: Namespace,
     draft_model_config: AutoDraftModelConfig,
@@ -670,6 +687,9 @@ def build_dataloaders(
     is_online = (
         args.train_data_path is not None and args.train_hidden_states_path is None
     )
+    require_offline_position_ids = _requires_offline_position_ids(
+        args, draft_model_config
+    )
     with rank_0_priority():
         train_eagle3_dataset = build_eagle3_dataset(
             dataset=train_dataset,
@@ -702,6 +722,7 @@ def build_dataloaders(
                 args.max_length,
                 ttt_length=args.ttt_length,
                 use_usp_preprocess=(args.attention_backend == "usp"),
+                require_position_ids=require_offline_position_ids,
             )
 
     train_dataloader = prepare_dp_dataloaders(
@@ -745,6 +766,7 @@ def build_dataloaders(
                 args.max_length,
                 ttt_length=args.ttt_length,
                 use_usp_preprocess=(args.attention_backend == "usp"),
+                require_position_ids=require_offline_position_ids,
             )
         eval_dataloader = prepare_dp_dataloaders(
             eval_eagle3_dataset,
